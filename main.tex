@@ -1,0 +1,96 @@
+\documentclass[lettersize,journal]{IEEEtran}
+\usepackage{amsmath,amsfonts}
+\usepackage{algorithmic}
+\usepackage{algorithm,float}
+\usepackage{array}
+\usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{subfig}
+% \usepackage{subfigure}
+\usepackage{cite}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{gensymb}
+\usepackage{listings}
+\DeclareCaptionLabelFormat{cont}{#1~#2\alph{ContinuedFloat}}
+\captionsetup[ContinuedFloat]{labelformat=cont}
+\hyphenation{op-tical net-works semi-conduc-tor IEEE-Xplore}
+% updated with editorial comments 8/9/2021
+
+\makeatletter
+\newenvironment{breakablealgorithm}
+  {% \begin{breakablealgorithm}
+   \begin{center}
+     \refstepcounter{algorithm}% New algorithm
+     \hrule height.8pt depth0pt \kern2pt% \@fs@pre for \@fs@ruled 画线
+     \renewcommand{\caption}[2][\relax]{% Make a new \caption
+       {\raggedright\textbf{\ALG@name~\thealgorithm} ##2\par}%
+       \ifx\relax##1\relax % #1 is \relax
+         \addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##2}%
+       \else % #1 is not \relax
+         \addcontentsline{loa}{algorithm}{\protect\numberline{\thealgorithm}##1}%
+       \fi
+       \kern2pt\hrule\kern2pt
+     }
+  }{% \end{breakablealgorithm}
+     \kern2pt\hrule\relax% \@fs@post for \@fs@ruled 画线
+   \end{center}
+  }
+\makeatother
+
+\begin{document}
+
+
+\title{Vehicle-Cloud Collaborative Anti-Rollover Planning and Control for Autonomous Tank Trucks}
+
+\author{Xiaojing Qi, Yugong Luo, Bolin Gao, Wei Zhong
+        % <-this % stops a space
+\thanks{Manuscript received July 20, 2026; revised October 16, 2026.This work was supported by the National Key R\&D Program of China (2021YFB2501000).\textit{(Corresponding author: Wei Zhong.)}} 
+\thanks{Xiaojing Qi , Yugong Luoand Bolin Gao are with the School of Vehicle and Mobility, Tsinghua University, Beijing 100084, China (e-mail: komasaqi@foxmail.com; lyg@tsinghua.edu.cn; gaobolin@tsinghua.edu.cn).}
+\thanks{Wei Zhong is with the State Key Laboratory of Intelligent Green Vehicle and Mobility, Tsinghua University, Beijing 100084, China (e-mail: zhongwei@mail.tsinghua.edu.cn).}}
+
+% The paper headers
+\markboth{IEEE TRANSACTIONS ON Intelligent Transportation Systems,~Vol.~14, No.~8, May~2027}%
+{Shell \MakeLowercase{\textit{et al.}}: A Sample Article Using IEEEtran.cls for IEEE Journals}
+% \IEEEpubid{0000--0000/00\$00.00~\copyright~2024 IEEE}
+% Remember, if you use this you must call \IEEEpubidadjcol in the second
+% column for its text to clear the IEEEpubid mark.
+\maketitle
+\allowdisplaybreaks[4]. 
+\input{sec/sec0_abstract}
+
+\input{sec/sec1_introduction}
+
+\input{sec/sec2_modeling}
+
+\input{sec/sec3_opimization_problem}
+
+\input{sec/sec4_simulation}
+
+\input{sec/sec5_experiment}
+
+\input{sec/sec6_conclusion}
+
+% \section*{Acknowledgments}
+% This should be a simple paragraph before the References to thank those individuals and institutions who have supported your work on this article.
+
+\input{sec/sec7_appendix}
+
+\bibliographystyle{IEEEtran}
+\bibliography{main}
+% \newpage
+\vspace{11pt}
+
+\input{sec/sec8_biography}
+
+\vfill
+
+\end{document}
+
+
+
+
