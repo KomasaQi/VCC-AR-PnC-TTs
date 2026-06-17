@@ -1,0 +1,34 @@
+% !TeX root = ../车云协同液罐车防侧翻行驶规划与控制研究.tex
+% 中英文摘要和关键字
+
+\begin{abstract}
+液罐车在高等级公路运行过程中具有质心高、液体晃动显著和事故后果严重等特点，侧翻风险始终是其主动安全研究中的核心问题。现有研究在液体晃动建模、防侧翻规划与控制等方面已取得一定进展，但在车路云一体化应用场景下仍存在三个不足：一是缺乏面向车路云协同防侧翻任务的统一架构方法，二是广域环境信息在长时域风险规避中的利用不足，三是快速车液耦合建模、局部应急规划与高频稳定控制之间尚未形成统一协同设计。针对上述问题，本文围绕车云协同液罐车防侧翻行驶规划与控制开展系统研究。
+
+首先，面向车云协同液罐车防侧翻场景，构建了车云协同液罐车防侧翻场景任务体系架构。本文建立了“战略—运行—服务—资源”四阶段递进的架构建模与闭环验证流程，为后续云端预测性决策、车端局部规划与高频控制提供了统一的系统边界、时间尺度约束和接口组织依据。
+
+其次，围绕云端预测性决策与车端局部规划，提出了图扩散交互式预测、强化学习长时域决策、防侧翻换道轨迹生成以及车端防侧翻避障应急轨迹规划方法。云端侧实现了对周车长时域非确定性行为的预测，并输出速度与换道行为决策以及满足侧翻约束的参考轨迹；车端侧建立了简化模型与约束迭代线性二次调节器求解框架，将障碍避让、道路边界和防侧翻约束统一纳入局部轨迹重构过程，形成了面向局部突发风险的快速应急规划方法。
+
+再次，围绕液罐车车液耦合动力学与高频稳定控制，提出了横纵向耦合液体晃动滑动伸缩天平模型、残差强化学习重线性化方法以及多约束模型预测控制策略。所建快速模型能够表征液体质量转移、附加力和附加力矩等关键效应，重线性化方法提升了其对高保真非线性动力学的在线逼近能力。在此基础上，建立了横纵向耦合半挂液罐车动力学模型，形成了轨迹跟踪、抑晃与防侧翻协同的高频控制方法。
+
+最后，搭建了车液耦合联合仿真平台与缩比例模型车试验平台，对所提方法开展了多工况仿真与模型试验验证。结果表明，本文提出的车云协同液罐车防侧翻方法能够增强系统对诱发性风险的前瞻规避能力，提升紧急工况下局部轨迹重构能力，并改善液罐车在高风险场景中的姿态稳定性和轨迹跟踪性能，验证了所提方法的有效性与工程可行性。
+
+\thusetup{
+  keywords = {车云协同, 液罐车, 防侧翻, 预测性决策, 轨迹跟踪控制},
+}
+\end{abstract}
+
+\begin{abstract*}
+Tanker trucks operating on highways are characterized by a high center of gravity, significant liquid sloshing, and severe accident consequences. Rollover risk therefore remains a key issue in active safety research. Existing studies have made progress in sloshing modeling, anti-rollover planning, and control, but three major gaps remain: the lack of a unified architecture-oriented method for vehicle-road-cloud integrated systems, limited use of wide-area information for long-horizon risk avoidance, and insufficient coordinated design among fast sloshing-oriented modeling, local emergency planning, and high-frequency stability control. To address these issues, this thesis investigates vehicle-cloud collaborative planning and control for tanker truck anti-rollover driving.
+
+First, a scenario-oriented model and simulation based system-of-systems engineering method is proposed, and the vehicle-cloud collaborative tanker truck anti-rollover mission architecture is established. The proposed method develops a four-stage architecture modeling and closed-loop verification process, namely strategy, operation, service, and resource, and provides unified system boundaries, time-scale constraints, and interface organization for subsequent cloud-side predictive decision-making, vehicle-side local planning, and high-frequency control.
+
+Second, for cloud-side predictive decision-making and vehicle-side local planning, a set of methods is developed, including graph-diffusion interactive prediction, reinforcement-learning-based long-horizon decision-making, anti-rollover lane-change trajectory generation, and vehicle-side emergency obstacle-avoidance trajectory planning. The cloud side predicts long-horizon stochastic behaviors of surrounding vehicles and outputs speed and lane-change decisions together with rollover-constrained reference trajectories. The vehicle side establishes a simplified model and a constrained iterative linear quadratic regulator framework to integrate obstacle-avoidance, road-boundary, and anti-rollover constraints into local trajectory reconstruction, thereby forming a fast emergency planning method for abrupt local risks.
+
+Third, for tanker liquid-vehicle coupled dynamics and high-frequency stability control, a longitudinal-lateral coupled sliding telescopic lever model, a residual-reinforcement-learning re-linearization method, and a multi-constraint model predictive control strategy are proposed. The fast model captures key effects such as liquid mass transfer, additional forces, and additional moments, while the re-linearization method improves online approximation to high-fidelity nonlinear dynamics. On this basis, a coupled articulated tanker dynamic model is established, yielding a high-frequency control method that coordinates trajectory tracking, sloshing suppression, and anti-rollover performance.
+
+Finally, a coupled vehicle-liquid co-simulation platform and a scaled model vehicle experimental platform are developed to validate the proposed methods through multiple simulation and experimental scenarios. Results show that the proposed vehicle-cloud collaborative anti-rollover method enhances predictive risk avoidance, improves local trajectory reconstruction under emergency conditions, and strengthens posture stability and trajectory tracking performance in high-risk scenarios, thereby verifying its effectiveness and engineering feasibility.
+
+\thusetup{
+  keywords* = {vehicle-cloud collaboration, tanker truck, anti-rollover, predictive decision-making, trajectory tracking control},
+}
+\end{abstract*}

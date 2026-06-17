@@ -1,0 +1,1131 @@
+% !TeX root = ../车云协同液罐车防侧翻行驶规划与控制研究.tex
+
+\chapter{车云协同预测性决策与防侧翻规划}
+\label{chap03_vehicle_cloud_collaborate}
+根据第\ref{chap:architecture}章中对车云协同液罐车防侧翻场景任务体系的分析结果，为降低诱发性风险并防止罐车陷入危险工况，需要结合云控系统中路侧设备的广域感知和云端的强大并行算力，对可能的危险情况进行预警，并向车端低频下发预测性决策建议。同时，受通信时延、丢包等通信不确定性及信息安全风险影响，为保证车端面对突发危险事件时的响应实时性，需要结合车端自身感知能力与应急响应能力，开展车端高频防侧翻避障轨迹规划。本章将车云协同预测性决策与防侧翻规划分解为云端和车端两大部分，并进一步细分问题进行讨论。在云端预测性决策与规划部分，首先介绍对周车进行长时域非确定预测的图扩散交互式预测模型，接下来介绍将其作为朴素世界模型的长时域预测性决策器强化学习训练方法及决策网络构建方法，最后介绍一种云端换道时用于输出平滑防侧翻路径的简易换道路径生成方法；在车端防侧翻避障规划部分，首先介绍一种考虑线性液体晃动的运动-动力学耦合液罐车模型，并在此基础上构建防侧翻避障运动规划方法，以更充分地利用实时感知信息、周车多模态预测结果及云端预测性建议路径，在借助云端建议的同时规避突发危险情况，保证车液系统的稳定性与安全性。
+
+
+\section{图扩散交互式预测模型}
+\label{sec:graphflow}
+现有单车自动驾驶方案能够根据近百米范围内的局部交通情况与周车进行有效交互，形成兼顾安全和效率的决策。但由于输入信息本质上局限于本车局部感知，车辆仍可能陷入原本可借助更长时域信息提前规避的危险情形。云控系统的重要价值在于为车端提供稳定可靠的额外信息来源。在本文关注的高速公路全路况交通中，考虑到高速环境交互的稀疏性，云端需整合被服务自车周边至少\SI{1}{km}范围内的路网交通信息（单车在限速\SI{120}{km/h}的高速公路上做出\SI{8}{s}规划时将覆盖前方\SI{266.7}{m}，因此云端至少需要覆盖前后约2倍于自车感知范围的区域，决策才具有实际意义），以获得比车端更充足的预测性信息，并为车端决策提供指导。
+
+本节介绍了一种基于图结构的流匹配扩散方法用于对周车进行长时域非确定预测，本节首先从图结构与图神经网络的介绍开始，随后展开了交通图特征表示方法及自回归图扩散交互式预测模型的构建方法。
+
+      
+  \subsection{交通图特征表示}
+    \label{sec:traffic_graph_representation}
+    基于图像的交通表征方法存在数据稀疏、路网重叠两类缺陷。数据稀疏性上，鸟瞰图（Bird's-Eye View, BEV）视图包含大量非道路空间，这在超大空间尺度的高速路上尤为明显，但非道路空间对决策规划无益；此外，对于广泛存在于高速路上用于汇入汇出的高架桥而言，其在高度方向重叠，而投影到二维平面后会产生道路几何上的重叠，造成不必要的混淆。故为在云端构建用于交通风险趋势识别的交互式长时域非确定性周车预测模型，以满足\SI{20}{s}时域下概率化占据与风险扩散预测需求，本研究采用有向图结构表示交通场景，如图~\ref{fig:bev_problem_and_solution}所示，以避免将算力浪费在非道路区域，集中资源描述道路交通状态，并在拓扑上避免重叠。
+
+    \begin{figure}
+      \centering
+      \subcaptionbox{BEV大尺度下表征问题 \label{fig:bev_problem}}
+        {\includegraphics[width=0.4\linewidth]{fig/chap3/bev_problem.png}}
+      \subcaptionbox{图结构路网（简化） \label{fig:graph_solution}}
+        {\includegraphics[width=0.4\linewidth]{fig/chap3/graph_solution.png}}
+      \caption{图结构交通表征优势}
+      \label{fig:bev_problem_and_solution}
+    \end{figure}
+
+    \subsubsection*{(1)路网离散化}
+      为将路网转化为有向图结构，本研究设计了一种横纵差异分辨率的路网离散方法，并设计了路口处的网格自适应方法。对于路网输入，采用SUMO\footnote{Simulation of Urban MObility, \url{https://sumo.dlr.de/}}软件提供的基本元素组织路网文件格式，如图~\ref{fig:road_dict_illust}所示，包含路口/节点(Junction)、路段/边(Edge)、车道/Lane三大基本元素，并通过连接关系（Connection）将这些元素组织起来。
+      \begin{figure}
+        \centering
+        \subcaptionbox{路网元素示意 \label{fig:road_struct}}
+          {\includegraphics[width=0.4\linewidth]{fig/chap3/road_struct.png}}
+        \subcaptionbox{路网数据结构字典 \label{fig:road_dict}}
+          {\includegraphics[width=0.58\linewidth]{fig/chap3/road_dict.png}}
+        \caption{路网数据结构}
+        \label{fig:road_dict_illust}
+      \end{figure}
+      路网离散时，为充分表征车道级别车辆的动态，区别于上一节宏观交通预测的交通图构建方法，将路段与路口的路面进一步细分为米级离散节点，称为“道路像素（Road Pixel）”（或“道路节点”，简称为“节点”）。首先以路段为单位进行横向离散，考虑车辆横纵向移动能力显著不同，为简化计算，设定横向离散分辨率为$d_{lat}=$\SI{1.25}{m}，将每条车道三等分；在纵向上采用$d_{lon}=$\SI{2.5}{m}分辨率，如图~\ref{fig:case1_edge}所示，保证路上的车辆至少在纵向占据一个完整的道路节点。在连接关系上，路段上每个节点都包含指向下一个节点和下个节点的横向节点的有向连接（当存在对应节点时）。
+      
+      \begin{figure}
+        \centering
+        \subcaptionbox{路段的离散化 \label{fig:case1_edge}}
+          {\includegraphics[width=0.3\linewidth]{fig/chap3/case1_edge.png}}
+        \subcaptionbox{车道变化路口离散化 \label{fig:case2_reduce}}
+          {\includegraphics[width=0.31\linewidth]{fig/chap3/case2_reduce.png}}
+        \subcaptionbox{车道不变路口离散化 \label{fig:case3_same}}
+          {\includegraphics[width=0.31\linewidth]{fig/chap3/case3_same.png}}
+        \vspace{0.2cm}
+        \subcaptionbox{实际路段离散化示例 \label{fig:example_net}}
+          {\includegraphics[width=1.0\linewidth]{fig/chap3/example_net.png}}
+
+        \caption{路网离散方法示例}
+        \label{fig:discrete_network}
+      \end{figure}
+
+      对于路口的几何结构，每条边连接的采用自适应网格方法进行离散。定义出路口车道数为$N_{L}^{out}$，入路口车道数为$N_{L}^{in}$，当$N_{L}^{in} \ne N_{L}^{out}$时如图~\ref{fig:case2_reduce}所示，中间插入$ | N_{L}^{in} - N_{L}^{out}  |$层数量依次递减的路口节点并用金字塔式连接，否则根据最长内路段（In Junction Edge）和纵向离散度计算节点插入层数，采用顺次连接以体现路口处不能换道的交通规则，如图~\ref{fig:case3_same}所示。最终，路网内所有边与路口被离散化并进行有向连接，形成有向图离散化道路结构。
+
+    \subsubsection*{(2)路网特征设计}
+      在图结构路网中，每个道路像素节点包含静态和动态两类特征。其中静态特征表征道路基础结构与导航语义信息共8维，包含节点的二维位置$p_x, p_y$、车道位置类型$c_{lane}$（车道中线/左侧/右侧，道路左边界/右边界，路口连接）、自由边$c_{free}$（路段起点/终点/中间）、车道序号$k_{lane}$（最右侧道路中心为0，向左增加）、道路类型$c_{edge}$（高速主路、匝道）、道路限速$v_{lim}$（\SI{}{m/s}，并归一化）、是否在导航路线内$c_{nav}$；动态特征表征该节点车辆相关信息共8维，包含车辆占用水平$c_{occ}$（不包含自车）、车辆类型$c_{veh}$、车辆速度$v_{veh}$（\SI{}{m/s}，并归一化）、车辆加速度$a_{veh}$（\SI{}{m/s^2}）、车辆航向角$h_{veh}$、自车占用水平$c_{ego}$、车辆意图$c_{int}$（估算得到的不同车辆意图的可能性，接近匝道口时共3种：直行，汇出，汇入）、风险场$c_{risk}$。边特征包含边类型$c_{con}$（顺次/向左/向右/路口）与归一化节点距离$d_{con}$。将$c_{int}$与$c_{veh}$进行one-hot编码后静态节点特征维度$d_{\mathrm{v}}^{stat}=8$，动态节点特征维度$d_{\mathrm{v}}^{dyn}=25$，节点特征$d_{\mathrm{v}}=d_{\mathrm{v}}^{stat}+d_{\mathrm{v}}^{dyn}=33$；将$c_{con}$进行one-hot编码后边特征维度$d_{\mathrm{e}}=5$。通过这些节点和边特征，图结构能够全面表征交通场景中的道路网络和车辆动态，为后续的预测和决策提供丰富的信息基础。
+
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/feature_example.png}
+        \caption{路网特征表示}
+        \label{fig:features_example}
+      \end{figure}
+
+      由于特征表示并非以车辆为单位，而是将车辆与道路全部离散在道路空间上，故在存在车辆占据或自车占据（$c_{occ} \ge 0.95$或$c_{ego} \ge 0.95$）的节点上，动态特征中车辆相关信息均由对应车辆进行填充，否则均填充为0。
+
+      风险场$c_{risk}$特征计算考虑静态占用与相对自车的动态风险，计算包含相对速度归一化、占据风险融合、速度风险融合三部分。静态风险来源于车辆占据特征$c_{occ}$及其沿道路正反向边的扩散。考虑$c_{lane}$相同的沿道路方向的一组节点，对其中节点$\mathrm{v}_i$，设$i$增大方向为节点正向，则第$k$跳节点$\mathrm{v}_{i+k}$与$\mathrm{v}_i$沿道路方向的距离为$D_{lon} = |k\cdot d_{lon}|$，其中$k \in \mathbb{Z}$。占据风险沿道路正负向指数衰减：
+
+      \begin{equation}
+      R_{occ}(i,k) = \begin{cases}c_{occ}(i)\cdot \lambda_f^{k} & k > 0\\ c_{occ}(i) & k = 0\\ c_{occ}(i)\cdot \lambda_b^{-k} & k < 0\end{cases} \quad
+      R_{spd}(i,k) = \begin{cases} c_{v}^+(i)\cdot \lambda_f^{k} & k > 0\\ c_{v}^{+}(i) + c_{v}^{-}(i) & k = 0\\ c_{v}^-(i)\cdot \lambda_b^{-k} & k < 0\end{cases}
+      \end{equation}
+      \noindent 其中，$\lambda_f$为占据与速度风险沿道路正向的指数衰减系数，$\lambda_b$为沿道路逆向的指数衰减系数；$c_v^+(i)$为节点$i$的正归一化相对速度风险分量（自车与周边车辆的正向相对速度映射值），$c_v^-(i)$为节点$i$的负归一化相对速度风险分量（自车与周边车辆的逆向相对速度映射值），两类速度风险分量的指数衰减规律与占据风险保持一致。
+      
+      总占据风险可以计算为与目标节点$j$同车道沿道路方向的所有源节点$i$对$j$的风险贡献需进行叠加求和，其中$\Omega_b(j)$表示与$j$满足同车道条件、可通过正反向扩散对其产生风险贡献的全部源节点集合，$j-i$为源节点$i$到目标节点$j$的相对扩散跳数，对应扩散距离为$D_{lon}=|(j-i)\cdot d_{lon}|$。
+      \begin{equation}
+      c_{risk}(j) = \min(\sum_{i\in\Omega_b(j)}R_{occ}(i,j-i) + \lambda_{spd} R_{spd}(i,j-i),1)
+      \end{equation}
+      \noindent 其中，$\lambda_{spd}$为速度风险到占据风险的量纲转换系数，用于统一两类风险的量纲以实现融合；$\min(\cdot,1)$为风险值的上限约束，将最终风险场特征归一化至$[0,1]$区间；$\sum$算子对$\Omega_b(j)$中所有源节点$i$的占据风险分量与速度风险分量分别求和后融合。
+
+      在图数据表达上，图中所有节点的静态特征$F_{stat}$与动态特征$F_{dyn}$分别为:
+      \begin{equation}
+      \begin{aligned}
+      F_{stat}&= \left[p_x, p_y, c_{lane}, c_{free}, k_{lane}, c_{edge}, v_{lim}, c_{nav}\right]\\
+        F_{dyn}&= \left[c_{occ}, c_{veh}, v_{veh}, a_{veh}, h_{veh}, c_{ego}, c_{int}, c_{risk}\right]
+      \end{aligned}
+      \end{equation}
+      单张图节点特征矩阵由静态和动态特征拼接而成，图$\mathcal{G}$包含节点集$\mathcal{V}$与边集合$\mathcal{E}$：
+      \begin{equation}\mathcal{V} = \left[F_{stat} \oplus F_{dyn}\right]\in \mathbb{R}^{n_\mathrm{v} \times d_\mathrm{v}} \quad \mathcal{E} = F_{con} \in \mathbb{R}^{n_\mathrm{e} \times d_\mathrm{e}} \quad \mathcal{G}=(\mathcal{V},\mathcal{E})\end{equation}
+      
+
+
+  \subsection{自回归图扩散交互式预测模型}
+    基于上述图结构交通表征方法，本研究设计了一种名为Graphflow的自回归图扩散交互式预测模型，用于云端长时域非确定性周车预测，其结构与训练流程如图~\ref{fig:graphflow_training}所示。
+
+    \begin{figure}
+      \centering
+      \includegraphics[width=1.0\linewidth]{fig/chap3/graphflow_training.png}
+      \caption{Graphflow模型训练过程}
+      \label{fig:graphflow_training}
+    \end{figure}
+
+    \subsubsection*{(1)训练数据结构}
+      高速场景下液罐车限速\SI{80}{km/h}、乘用车限速\SI{120}{km/h}，乘用车\SI{20}{s}最大行驶距离约\SI{666.7}{m}，后方高速车辆可追及自车形成交互。为覆盖全部潜在交互范围并满足模型拓扑恒定要求，经取整与余量预留，通过采集SUMO历史交通数据并在不同时刻构建以该时刻自车沿路网前向距离$D_{ahead}=\SI{700}{m}$，后向距离$D_{behind}=\SI{300}{m}$的图结构路网，将过去历史时域和预测时域$T=\SI{20}{s}$（本研究中历史时域与预测时域相等）以及当前选定时刻$k$的车辆数据映射到该交通图网络结构上作为每个对应节点的动态特征:
+      \begin{equation}
+      \mathrm{v}_i = F_{i,stat} \oplus F_{i,vehs}^{-T+k:k} \oplus F_{i,ego}^{-T+k:k},\mathrm{v}_i \in \mathcal{V}^k 
+      \end{equation}
+      
+      \noindent 其中，$F_{i,stat}$为静态特征，包含路网静态信息（如车道数、交通流方向等）；$F_{i,vehs}^{-T+k:k}$为历史加当前时刻周车动态特征（如速度、加速度、相对距离等）；$F_{i,ego}^{-T+k:k}$为历史与当前时刻自车占据情况，$\oplus$为向量拼接（Concatenate）操作，$\mathcal{V}^k$表示第$k$时刻的图结构路网节点集合。所有时刻的边特征集$\mathcal{E}$均为静态特征，保持不变。
+
+    
+      
+    \subsubsection*{(2)特征提取器设计}
+      图编码器采用多层图神经网络结构，对输入的图结构路网进行特征提取与局部、全局信息聚合，并加入时间编码与动作编码引导生成，通过邻居节点与边的特征传递与更新局部特征，通过全局线性注意力捕捉交通场景中的时空依赖关系与交互作用，生成下一时刻$k+1$的节点动态特征变化速度向量集$v^\bm{\theta}(F_{dyn}^{k+1})$以实现图扩散（$\bm{\theta}$为Graphflow模型参数）。
+
+      具体而言，在每次自回归迭代内的特征提取环节，当前时间$t$被通过正弦时间编码器编码：
+
+      \begin{equation}
+        e_{t}=\left[\sin{(t\cdot \exp{(i\cdot\frac{-\ln L_{max}}{\text{half}-1})})} \oplus \cos{(t\cdot \exp{(i\cdot\frac{-\ln L_{max}}{\text{half}-1})})} \right]_{i=1}^{\text{half}-1}
+      \end{equation}
+
+      \noindent 其中，$e_t$为时间编码向量，设$e_t$维度为 $\boldsymbol{\text{dim}}$，输入时间标量为 $t$，向下取整运算为 $\lfloor \cdot \rfloor$，定义运算符$\text{half}=\lfloor \frac{\text{dim}}{2} \rfloor$，索引$i\in \{ 0,1,2,\cdots, \text{half}-1\}$，$L_{max}=10000$为预设常数。同时，自车动作通过多层感知机（Multi-Layer Perceptron, MLP）编码为动作编码向量$e_a$，二者共同用于引导图神经网络的特征提取过程。
+
+      为满足图的无序性的同时增加表达能力，改进Polynomer\cite{Polynomer2024}图Transformer结构作为图编码器的基础结构，加入对边特征集$\mathcal{E}$的处理，以更好地辅助网络认知全图特性进行扩散。首先通过线性变换将节点特征与边特征映射到隐藏维度$d_h$，并将时间编码$e_t$与动作编码$e_a$通过线性变换映射到$d_h$维度后与节点特征相加实现时间与动作信息的注入。随后，经过多层级联的全局线性图注意力层与改进GATv2的局部图注意力层实现全局特征聚合与局部邻居特征聚合。具体而言，改进的GATv2局部图注意力层通过引入边特征实现邻居节点间的边特征辅助注意力权重计算：
+
+      \begin{equation}
+        \mathbf{v}_i^{\prime} = \sum_{j\in \mathcal{N}(i)\cup \{i\}} \alpha_{ij}\Theta_t \mathbf{v}_j
+      \end{equation}
+
+      \noindent 其中，$\mathbf{v}_i^{\prime}$为节点$\mathrm{v}_i$的特征$\mathbf{v}_i$经过注意力变换后的结果，$\Theta_t$为可学习的线性映射矩阵，$\mathbf{v}_j$为节点$\mathrm{v}_j$的特征，注意力系数$\alpha_{ij}$为将边特征与节点特征聚合得到：
+
+      \begin{equation}
+        \alpha_{ij} = \frac{\exp{(\text{LeakyReLU}(a^T[\Theta_s \mathbf{v}_i \oplus \Theta_t \mathbf{v}_j \oplus \Theta_e \mathbf{e}_{ij}]))}}{\sum_{k\in \mathcal{N}(i)\cup \{i\}} \exp{(\mathbf{a}^T\text{LeakyReLU}([\Theta_s \mathbf{v}_i \oplus \Theta_t \mathbf{v}_k \oplus \Theta_e \mathbf{e}_{ik}]))}}
+      \end{equation}
+      
+      \noindent 其中，边特征$\mathbf{e}_{ij} \in \mathcal{E}$表示从节点$\mathrm{v}_i$到节点$\mathrm{v}_j$的边特征，$\Theta_s, \Theta_t, \Theta_e$为可学习的线性变换矩阵，$\mathbf{a}$为注意力机制的可学习参数向量，$\mathcal{N}(i)$为节点$\mathrm{v}_i$的邻居节点集合。通过该机制，局部图注意力层能够有效利用边特征信息提升邻居节点特征聚合的表达能力。
+
+      % 全局图注意力层（GGA）线性多项式注意力实现
+      全局图注意力层通过计算节点间的线性多项式注意力权重实现全局节点特征聚合，突破传统图注意力$O(N^2)$的时间复杂度限制，在线性时间内捕捉交通路网中节点的全局时空依赖与长距离交互作用，同时引入注意力头机制提升特征表达能力，并通过残差融合实现全局-局部特征的互补增强，其核心聚合过程为：
+      \begin{equation}
+          \mathbf{v}_i^{\text{global}} = (1-\beta) \cdot \Theta_g \left( \bigoplus_{m=1}^h \sum_{j\in \mathcal{V}} \beta_{ij}^{(m)} \Theta_v^{(m)} \mathbf{v}_j^{\text{local}} \right) + \beta \cdot \mathbf{v}_i^{\text{local}}
+      \end{equation}
+      \noindent 其中，$\mathbf{v}_i^{\text{local}}$为局部图注意力层输出的节点$i$局部聚合特征，$\mathcal{V}$为全图节点集合，$h$为注意力头数，$\beta_{ij}^{(m)}$为第$m$个注意力头下节点$i$对节点$j$的全局线性多项式注意力权重，由多项式核函数计算得到且通过掩码$\text{mask}(j)$屏蔽批次外无效节点。
+      $\Theta_g, \Theta_v^{(m)}$为可学习的线性变换矩阵，$\beta \in (0,1)$为全局-局部特征融合系数，用于平衡全局长距离依赖与局部邻居交互的特征贡献，$\bigoplus$为多注意力头特征的拼接操作。进一步，第$m$头的全局注意力权重由多项式点积核函数归一化得到：
+      \begin{equation}
+          \beta_{ij}^{(m)} = \frac{\exp\left( \mathbf{Q}_i^{(m)} \cdot (\mathbf{K}_j^{(m)})^T \right) \cdot \text{mask}(j)}{\sum_{k\in \mathcal{V}} \exp\left( \mathbf{Q}_i^{(m)} \cdot (\mathbf{K}_k^{(m)})^T \right) \cdot \text{mask}(k)}
+      \end{equation}
+      \noindent 其中，$\mathbf{Q}_i^{(m)} = \Theta_q^{(m)} \mathbf{v}_i^{\text{local}}$、$\mathbf{K}_j^{(m)} = \Theta_k^{(m)} \mathbf{v}_j^{\text{local}}$为节点$i,j$在第$m$头的查询、键特征，$\Theta_q^{(m)},\Theta_k^{(m)}$为对应注意力头的可学习线性映射矩阵，该多项式核函数通过特征空间分解实现线性时间复杂度的全局注意力计算，适配交通路网的大规模图结构特征提取需求。
+
+      % 时间编码e_t与动作编码e_a的特征注入
+      完成图注意力层的局部-全局特征聚合基础结构设计后，将时间编码$e_t$与动作编码$e_a$通过线性变换维度对齐与残差相加的方式注入图编码器的特征提取全流程，实现时间演化规律与自车动作意图对路网特征扩散的定向引导。
+
+      % 特征提取器输出与FCN的连接设计
+      最后，将特征提取器输出连接到多个全连接网络（Fully Connected Network, FCN）并对需要限制范围的输出如$c_{ego}$,$c_{risk}$等加入$\text{Softmax}(\cdot)$函数进行非线性映射。最终将所有输出拼接起来作为模型的最终输出$v^\bm{\theta}(F_{dyn}^{k+1})$，即第$k+1$时刻所有节点动态特征的速度向量。
+
+    \subsubsection*{(3)图扩散流匹配训练}
+      流匹配扩散模块基于流匹配理论，学习交通状态的速度向量场。通过最小化条件流匹配（Conditional Flow Matching, CFM）损失函数$\mathcal{L}_{CFM}(\bm{\theta})$，训练模型生成符合目标分布的未来交通状态样本。该模块能够有效捕捉交通状态的动态变化，实现对未来交通状态的多模态预测。
+
+      在原始生成任务中由于没有真实的流动，所以需要人为构造整合流以从先验分布平滑过渡到目标分布。但本任务中，由于节点特征在未来所有时刻的变化在训练时全部可知，故可以直接获得真实流$\psi^{target}_t(\mathcal{V}_k|\mathcal{V}_{k+1})$，并通过时间差值微分的方式计算出目标速度向量场$v_t^{target}(F_{dyn}^{t}|\mathcal{V}_{k+1})$。积分时利用FM的良好性质可直接采用欧拉法进行一步数值积分，避免了复杂的随机微分方程求解过程，提高了计算效率。
+
+
+      在自回归预测时，不可避免地会将上一时刻的误差引入到当前时刻的预测中，而这一误差随自回归预测时域增长会逐渐积累，导致预测结果偏离真实轨迹。为缓解误差积累问题，本研究在训练过程中引入调度采样课程学习（Scheduled Sampling Curriculum Learning, SSCL）机制，通过在训练过程的自回归预测中以随着训练进度而越来越高的概率选择使用模型自身的预测结果作为下一时刻的输入，从而增强模型对自回归误差的鲁棒性\cite{DCRNN2018}。具体而言，在每次训练迭代中，根据已经训练的mini-batch数量$N_{batch}$计算一个调度采样概率$\epsilon_{sscl}$：
+
+      \begin{equation}
+        \epsilon_{SSCL} = \frac{\tau_{SSCL}}{(\tau_{SSCL} + \exp(N_{batch}/\tau_{SSCL}))}
+      \end{equation}
+      
+      \noindent 其中，$\tau_{SSCL}$为预设的衰减系数，以$\epsilon_{SSCL}$的概率保留数据集中未来时刻的动态特征真值$F_{dyn}^{k+1}$，以$1-\epsilon_{SSCL}$的概率使用模型预测结果$F_{dyn}^{\bm{\theta},k+1}$替换对应真值动态特征在下次自回归过程中共同组成时空图输入。随着训练的进行，$\epsilon_{SSCL}$的值逐渐从1降低至0，使模型逐步适应自回归预测环境，实现了自回归训练稳定性的显著增加。
+
+      Graphflow模型的训练流程见算法~\ref{alg:train_graphflow}。
+
+      \renewcommand{\algorithmicrequire}{\textbf{输入：}\unskip}
+      \renewcommand{\algorithmicensure}{\textbf{输出：}\unskip}
+
+      \begin{algorithm}
+        \caption{Graphflow训练流程}
+        \label{alg:train_graphflow}
+        \small
+        \begin{algorithmic}
+          \REQUIRE 训练集时空图数据集$\{\mathbf{G}_i, ~i = 1,2,\dots,N_{data}\}$，其中$N_{data}$为数据集包含的时空图总数，$\mathbf{G}_i = \{\mathcal{G}^{-T},\mathcal{G}^{-T+1},\cdots,\mathcal{G}^{-T+k},\cdots,\mathcal{G}^0,\cdots, \mathcal{G}^{T}\}, \mathcal{G}^k=\{\mathcal{V}^k,\mathcal{E}\}$（省略下标$i$）
+
+          \ENSURE 给定时刻$t$下图节点所有动态特征变化速度预测$v_t^{\bm{\theta}}(F_{dyn}^{t}|\mathcal{V}_{k+1}), t\in [k,k+1]$
+          \STATE $N_{batch} \leftarrow 0$
+          \FOR{$epoch = 1,2,\dots,N_{max,epoch}$}
+            \FOR {$i = 1,2,\dots,N_{data}$}
+              \STATE 获取时空图$\mathbf{G}_{st}\leftarrow\mathbf{G}_i$ 
+              \FOR{$k = 0,1,2,\dots,T-1$}
+                \STATE $\mathcal{G}_{st}\leftarrow F_{stat} \oplus F_{dyn}^{-T+k:k} $构造历史时空图
+                \STATE $t \leftarrow \mathcal{U}(k,k+1)$ 随机选取时间
+                \STATE $v_t^{target}(F_{dyn}^{t}|\mathcal{V}_{k+1})\leftarrow \text{diff}(F_{dyn}^{k},F_{dyn}^{k+1},t-k)$ 时间微分计算目标速度向量场
+                \STATE $v_t^{\bm{\theta}}(F_{dyn}^{t}|\mathcal{V}_{k+1}) \leftarrow \text{GraphflowModel}(\mathcal{G}_{st},t)$
+                \STATE $\mathcal{L}_{CFM}(\bm{\theta}) = \lVert v_t^{\bm{\theta}}(F_{dyn}^{t}|\mathcal{V}_{k+1}) - v_t^{target}(F_{dyn}^{t}|\mathcal{V}_{k+1}) \rVert^2$
+                \STATE 更新参数：$\bm{\theta} \leftarrow \bm{\theta} - \eta \nabla_{\bm{\theta}} \mathcal{L}_{CFM}(\bm{\theta})$
+                \STATE $F_{dyn}^{\bm{\theta},k+1} = F_{dyn}^{k} + \text{Euler}(\text{GraphflowModel}(\mathcal{G}_{st},t))$
+                \STATE $\epsilon_{SSCL} = \text{calculateSSCLThred}(N_{batch}) $ 调度采样课程学习
+                \IF {$\text{rand}() \leq \epsilon_{SSCL}$} 
+                  \STATE $F_{dyn}^{k+1} \leftarrow F_{dyn}^{\bm{\theta},k+1}$  以$\epsilon_{SSCL}$的概率保留数据集中未来时刻的动态特征真值$F_{dyn}^{k+1}$
+                \ENDIF
+                \STATE $N_{batch} \leftarrow N_{batch} + 1$
+              \ENDFOR
+            \ENDFOR
+          \ENDFOR
+        \end{algorithmic}
+      \end{algorithm}
+
+    关于Graphflow方法进行图扩散流匹配理论有效性的证明请参见附录中补充理论部分\cite{KomasaQi2026MasterThesis_repo}。
+
+
+\section{强化学习长时域决策模型}
+  上一节介绍了Graphflow图扩散流匹配交互式预测模型，其通过类像素式的非确定性预测表征周车未来演化分布。本节主要介绍以Graphflow模型作为朴素世界模型的强化学习长时域决策模型设计与实现。
+
+  \subsection{车辆参数与意图识别}
+  \label{subsection:param_and_int_recog}
+    为对周车参数与意图不确定性进行建模以作为网络初始输入，本研究基于云端实时交通孪生以及建立周车概率化的跟驰与换道模型，并反映驾驶员参数与意图的不确定性。云控平台能够通过路侧感知设备上传、智能车辆感知数据上传、交管平台信息共享等方式获得动静态交通信息，并通过对地图进行分区后云端并行建立各个小区域内的整体交通状况孪生。借助车辆ReID技术，云端孪生的每一辆车都是有唯一全局编号的，且可以通过数据库，在不侵害道路使用者个人隐私的范围内调取过去一小段时间内的行驶数据，以及该车辆的用于预测模型，进行参数与意图更新，用于动态推演。
+
+    在云端建立周车概率模型的方法，包括以下步骤：
+
+    步骤1，云端据被服务车辆的目的地及选择路线进行沿途道路地图信息的切分与抽取，根据车辆所在位置范围不同切分地图用以建立周车概率模型；
+
+    步骤2，每个规划周期初始，云端接收传感器感知数据进行目标级融合感知，建立实时交通孪生，并获取被服务车辆的状态信息；
+
+    步骤3，每个规划周期中，通过被服务车辆所在位置调取离散化道路图信息，通过参数识别算法根据历史信息更新车辆的驾驶员模型与换道模型的参数与参数的方差（体现参数的不确定性），通过意图识别算法识别出车辆可能的意图及其方差（体现意图的不确定性）。
+
+    \noindent 其中，云端接收传感器感知数据包括路侧感知单元的感知数据、智能网联车辆的感知数据；离散化道路图为车道级结构化地图信息，地图信息形式如图~\ref{fig:road_dict}所示。
+
+    本研究中采用的驾驶员模型为修改后的智能驾驶员模型（Intelligent Driver Model, IDM）\cite{IDM_2020}，其形式为：
+    \begin{equation}
+      s^\ast = s_{min} + \text{softplus} \left(v_{ego} T_{hw}+\frac{v_{ego}(v_{ego}-v_p)}{2\sqrt{a_{max}b_{comf}}}\right)
+    \end{equation}
+    \begin{equation}
+      a_{pred} = a_{max} \left(1-\left(\frac{v_{ego}}{v_{des,ego}}\right)^\delta_v - \left(\frac{s^\ast}{s}\right)\right)
+    \end{equation}
+    \noindent 其中，$\text{softplus}(\cdot)$函数为$\text{softplus}(x) = \ln(1+e^x)$，用$\text{softplus}(\cdot)$函数代替$\text{ReLU}(\cdot)$可以使IDM模型处处可导，得到各参数的解析梯度。需要估计的参数$\theta_{IDM}$包括期望车头时距$T_{hw}$、最大加速度$a_{max}$、舒适减速度$b_{comf}$、最小车间距$s_{min}$、期望速度$v_{des,ego}$、激进程度$\delta_v$组成的向量。
+
+    在车辆换道预测模型方面，本文以广为认可的MOBIL模型（Minimize the Overall Braking Included by Lane Changes, MOBIL）\cite{MOBIL_1999}为基础，定义一辆车采取$L,K,R$（左换道，车道保持，右换道）动作概率的获取步骤：
+
+    步骤1：利用MOBIL模型思想获取换道加速度向量$\boldsymbol{a}$，包含$\Delta a_{L,ego}$、$a_{k,ego}=0+\Delta a_{R,ego}$，$\Delta a_{L,f}$、$\Delta a_{R,f}$。自车$L,K,R$动作对应的自车和换道后的后车各自的预期加速收益（用识别好的每辆车的驾驶员模型计算），对自车来说，是换道之后的加速度与换道前加速度的差；对后车来说，是换道后新车因自车换道的损失与换道前原后车因自车换道带来的收益的和。
+
+    步骤2：设计评价函数：评价函数$f(a,p)$需要能够反映车辆对不同换道选项的偏好，一般加速度越大，车辆越倾向于选择该行为，可以定义：
+    \begin{equation}
+    \begin{cases}
+    f(\Delta a_{L,ego},\Delta a_{L,f}) = \alpha_L(\Delta a_{L,ego} + p\Delta a_{L,f}) + \beta_L \\
+    f(\Delta a_{R,ego},\Delta a_{R,f}) = \alpha_R(\Delta a_{R,ego} + p\Delta a_{R,f}) + \beta_R
+    \end{cases}
+    \end{equation}
+    \noindent 其中，$\alpha_L,\beta_L,\alpha_R,\beta_R,p$共5个参数为待识别的模型参数，公用的参数$p$是对应MOBIL模型的礼貌系数，反映这辆车对自车影响其他车的重视程度，所有参数为$\theta_{MOBIL}$。
+
+    步骤3：获取这辆车的换道概率，采用$\text{Softmax}(\cdot)$函数对评价函数的输出进行归一化即可获得此时刻左右换道与不换道决策的概率。
+    \begin{equation}
+    \begin{cases}
+    P(L) = \frac{e^{f(\Delta a_{L,ego},\Delta a_{L,f})}}{e^{f(\Delta a_{L,ego},\Delta a_{L,f})} + 1 + e^{f(\Delta a_{R,ego},\Delta a_{R,f})}} \\
+    P(R) = \frac{e^{f(\Delta a_{R,ego},\Delta a_{R,f})}}{e^{f(\Delta a_{L,ego},\Delta a_{L,f})} + 1 + e^{f(\Delta a_{R,ego},\Delta a_{R,f})}} \\
+    P(K) = 1 - P(L) - P(R)
+    \end{cases}
+    \end{equation}
+
+    其次，本研究利用前向推演方式考虑自车与周车的交互，并通过不确定性累积机制利用不确定性周车信息辅助进行轨迹决策，在考虑不确定性信息的同时避免了“先预测，后决策规划”的逻辑错误，提高规划结果可信性、可行性。可以用于进行长时域可信自车决策，并考虑周车不确定性带来的潜在危险。
+
+    \begin{figure}
+      \centering
+      \subcaptionbox{参数与意图不确定性 \label{fig:param_int_uncertain}}
+        {\includegraphics[width=1.0\linewidth]{fig/chap3/param_int_uncertain.png}}
+      \subcaptionbox{MCMC方法联合识别参数与意图 \label{fig:mcmc}}
+        {\includegraphics[width=1.0\linewidth]{fig/chap3/mcmc.png}}
+      \caption{参数与意图联合识别方法}
+      \label{fig:param_int_uncertain_mcmc}
+    \end{figure}
+
+    采用贝叶斯估计中的马尔科夫链蒙特卡罗（Markov Chain Monte Carlo, MCMC）方法进行采样对驾驶员模型参数、换道模型参数及意图的不确定性进行更新。如图~\ref{fig:mcmc}所示，MCMC方法构建一个马尔科夫链，从后验分布中抽样出一系列的$\theta_{mdl}=\theta_{IDM}\oplus \theta_{MOBIL}$构建参数的概率分布。通过采样得到的$\theta_{mdl,1},\theta_{mdl,2},\dots,\theta_{mdl,M'}$，可对参数的分布进行估计。如果采样得到了$T_{hw}$的样本值$T_{hw}^{(1)},T_{hw}^{(2)},\dots,T_{hw}^{(M)}$，可以用样本均值作为参数的估计值，用样本方差作为该参数的不确定性，余下的问题在于后验概率如何求得。
+
+
+    驾驶员模型参数和意图参数识别采用时间触发机制，具体而言采用的意图识别算法为基于规则的可能性识别与贝叶斯推断的结合，通过地图信息与交通规则确定车辆在未来给定的较长一段距离内的意图分叉点（识别出了$K$种可能的意图，比如当前正在高速上行驶，前方\SI{500}{m}有匝道口，那么可能的意图包括直行和下匝道，如图~\ref{fig:param_int_uncertain}所示）；并以识别好的驾驶员模型为基础，分别设置车辆为不同的意图进行仿真（每种意图有各自的先验信息，可以通过道路结构、车辆位置进行合理推断给出，比如在匝道口可以根据往常交通流量+当前该车的车道位置+当前该车的加速趋势给出$P(\text{Go Straight})=0.25$，$P(\text{Exit})=0.75)$），利用过去一段时间给定时间窗口内的周车历史数据作为输入进行仿真，获得该车不同意图假设下的行为预测，损失函数采用预测测量与实际观测测量间的L2损失：
+    \begin{equation}
+    \mathcal{L}_{IDM}(\theta_v) = w_1||a_{pred} - a|| + w_2||v_{pred} - v|| + w_3||s_{pred} - s||
+    \end{equation}
+
+
+
+    某组参数和意图的后验概率$\pi(\theta_{mdl},I)$:各采样时刻（$N$个）基于$(\theta_{mdl},I)$预测的状态$X_{pred,i}(\theta_{mdl},I)$的误差正态分布概率乘积：
+    \begin{equation}
+    \pi(\theta_{mdl},I) = \prod_{i=1}^{N}\mathcal{N}\bigl(X_{pred,i}(\theta_{mdl},I) - X_{obsv,i},\sigma\bigr)
+    \end{equation}
+    \noindent 其中，状态$X$包括纵向/横向位置和速度，$\sigma$为先验值。
+
+    利用MCMC采样来对换道模型参数进行识别与更新采用事件触发机制，当该车发生换道行为，或模型预判该车换道但实际没有换道时进行参数更新。损失函数采用预测换道决策与实际决策的交叉熵损失：
+    \begin{equation}
+      \mathcal{L}_{MOBIL}(\theta_m) = P(L)\ln(p_L) + P(R)\ln(p_R) + P(K)\ln(p_K)
+    \end{equation}
+
+  \subsection{策略网络设计与训练}
+  \label{subsection:policy_net_design_and_training}
+    本小节介绍了策略网络结构设计与长时域预测性决策智能体强化学习训练方法，如图~\ref{fig:feature_extractor}所示。
+    \begin{figure}
+      \centering
+      \includegraphics[width=1.0\linewidth]{fig/chap3/feature_extractor.png}
+      \caption{策略网络设计与训练}
+      \label{fig:feature_extractor}
+    \end{figure}
+    \subsubsection*{(1)策略网络结构}
+      在输入输出结构上，决策算法采用字典输入与连续控制输出。每次决策时，智能体需输入当前时刻的交通图$\mathcal{G}^0$、过去$T$个时间步的周车动态特征$F_{vehs}^{-T:0}\in \mathbb{R}^{n_{veh} \times d_{veh} \times (T+1)}$、自车当前时刻特征$F_{ego}^0 \in \mathbb{R}^{d_{ego}}$，作为字典连续型输入。其中，交通图结构如第~\ref{sec:traffic_graph_representation}节所述，$d_{veh}=25$为周车特征维度，$d_{ego}=53$为自车特征维度，具体定义见表~\ref{tab:vehicle_feature}。为更好表达距离特征并兼顾近距离精度与远距离可表达性，本文采用Sigmoid非线性映射压缩距离场。
+
+      \begin{table}
+        \centering
+        \caption{决策模型输入输出特征维度与索引定义}  % 表格标题
+        \begin{tabularx}{\linewidth}{Xl}  % X列自适应宽度，l列左对齐（索引列）
+          \toprule
+          特征描述 & 索引/维度 \\  % 表头贴合你的示例风格
+          \midrule
+          \multirow{1}{*}{交通图输入} & 如\ref{sec:traffic_graph_representation}节所述 \\
+          \midrule
+          \multirow{8}{*}{自车状态输入} & 到终点距离、剩余车道距离：0-1 \\
+          & 纵向/横向速度、绝对航向角(cos/sin)：2-5 \\
+          & 灯语状态、匝道/主路、车道索引/偏移：6-11 \\
+          & 当前限速、道路进度、车辆长/宽：12-15 \\
+          & 车辆类型vClass、最高车速、导航意图(one-hot)：16-20（导航3维） \\
+          & 六方向邻车1/TTC、上次换道间隔：21-27 \\
+          & 下条车道限速、可通行车道mask：28-35（mask7维） \\
+          & 换道状态(one-hot)：36-52（17维） \\
+          \midrule  % 分隔自车/他车，贴合三线表极简风格
+          \multirow{5}{*}{他车状态输入} & 存在性、相对位置(x/y)、相对速度(vx/vy)：0-4 \\
+          & 相对航向角(cos/sin)、车道索引/偏移/主路标识：5-9 \\
+          & 当前限速、最高车速、灯语状态(左/右/刹车)：10-14 \\
+          & 车辆长/宽、vclass、导航意图(one-hot)：15-20（导航3维） \\
+          & MEI、1/RTTC、1/最近距离、车辆类别vtype：21-24 \\
+          \midrule  % 分隔自车/他车，贴合三线表极简风格
+          \multirow{1}{*}{控制输出} & 换道决策序列：(0,:)、期望加速度序列：(1,:)  \\
+          \bottomrule
+        \end{tabularx}
+        \label{tab:vehicle_feature}  % 表格交叉引用标签
+      \end{table}
+
+      特征编码上，设模型默认隐层特征维度为$D$，则交通图输入$\mathcal{G}^0$通过全局注意力池化层（Global Attention Pooling, GAP），将交通图节点特征$\mathcal{V}^0 \in \mathbb{R}^{n_{\mathrm{v}} \times d_{\mathrm{v}}}$和边特征$\mathcal{E}^0 \in \mathbb{R}^{n_{\mathrm{e}} \times d_{\mathrm{e}}}$压缩为全局交通图特征$E_{graph} \in \mathbb{R}^{D}$；自车特征采用自注意力编码器处理为$E_{ego}\in\mathbb{R}^{D}$；周车特征利用特征金字塔网络（Feature Pyramid Network, FPN）和邻域注意力网络（Neighborhood Attention Network, NAT）的多层级联堆叠\cite{PLUTO2024}进行编码，以融合历史特征，得到$E_{vehs}\in\mathbb{R}^{n_{veh} \times D}$。
+
+      特征提取主体部分采用Transformer编码器解码器结构。首先对图特征$E_{graph}$经过一个前馈连接层（Feed Forward Network, FFN）在不改变维度的情况下进行特征投影得到$E^{\prime}_{graph}\in\mathbb{R}^{D}$；将自车特征$E_{ego}$与周车特征$E_{vehs}$拼接并送入$L_{enc}$层带有无效车辆掩码的Agent-Agent自注意力编码器，分别得到编码后的自车特征$E_{ego}^{\prime}\in\mathbb{R}^{D}$与周车特征$E_{vehs}^{\prime}\in\mathbb{R}^{n_{veh}\times D}$。其次利用$L_{dec}$层交叉注意力解码器对特征进行解码，将处理后的地图特征与周车特征拼接用于生成每层的Key和Value，用编码后的自车特征作为第一层的Query，最终输出编码后特征$E_{dec}\in\mathbb{R}^{D}$。特征提取器为actor与critic公用以减少参数数量。
+
+      actor在特征提取器后接FCN连续输出层，输出未来$T$个横纵向控制量$F_{act}^{k+1:k+T} = \left(F_{acc}^{k+1:k+T}, F_{lane}^{k+1:k+T}\right)\in\mathbb{R}^{2\times T}$，每个时刻包含期望加速度和换道指令两个控制量。为避免混合输出架构，将离散的换道指令用连续值映射。
+
+    \subsubsection*{(2)优化训练方法}
+      云端决策方法采用PPO进行训练。在训练环境上，采用\ref{sec:graphflow}节介绍的图扩散交互式预测模型作为训练环境，最终在SUMO环境中进行验证。训练时在未来$T$个时间步不断取最新动作作为输入并自回归预测自车与周车动态演化情况。
+      
+      强化学习过程中的奖励函数计算考虑安全、效率、经济/舒适、决策一致性、规则和导航六个方面，各奖励函数按权重$w_{\cdot}$进行线性组合。
+      \begin{equation}
+        r = w_{\text{safe}}r_{\text{safe}} + w_{\text{effi}}r_{\text{effi}} + w_{\text{conf}}r_{\text{conf}} + w_{\text{cons}}r_{\text{cons}} + w_{\text{rule}}r_{\text{rule}}
+      \end{equation}
+      
+
+      定义时空图积分运算$\text{GraphSum}(\cdot)$
+      \begin{equation}
+        \text{GraphSum}(\cdot) = \frac{1}{T\cdot \sum_{\mathbf{v}\in\mathcal{V}}(c_{ego} > \epsilon_{occ})}\sum_{\mathbf{v}\in\mathcal{V}} \sum_{k=1}^{T} \gamma (\cdot)^{k} \odot (c_{ego} > \epsilon_{occ})
+      \end{equation}
+      \noindent 其中，$\gamma$为折扣因子，$\odot$为哈达玛积，即逐元素乘法，$\epsilon_{occ}=0.05$为存在性阈值。
+
+      车辆安全上，由于预测的非确定性，原本确定的周车占据特征会随着图流的过程逐渐扩散，直到弥散为一片区域，同时对应的风险也从集中的高风险表达扩散为分散的低风险表达，此时针对单车的计算指标如碰撞时间（Time to Collision, TTC）等便不再适用，所以需要惩罚自车占据大于阈值$c_{ego}>\epsilon_{occ}$掩码的风险场$c_{risk}$在预测时域$T$内的双重积分。
+      \begin{equation}
+        r_{\text{safe}} = - \text{GraphSum}(c_{risk})
+      \end{equation}
+
+      为鼓励车辆行驶到限速以提高效率，根据道路限速对速度进行奖励，定义效率奖励在车速奖励区间$[C_{v,low},C_{v,high}]\cdot v_{lim}$内线性增加；
+      \begin{equation}
+        r_{\text{effi}} = \text{GraphSum}\left(\frac{v_{veh}-C_{v,low}v_{lim}}{(C_{v,high}-C_{v,low})v_{lim}}\right) 
+      \label{eq:effi_reward}
+      \end{equation}
+
+      经济/舒适性上，惩罚加速度指令的二范数平方的同时加入换道代价；
+      \begin{equation}
+        r_{\text{conf}} = - \frac{1}{T} \lVert F_{acc} \rVert^2_2 - \frac{1}{T} \sum_{k=1}^{T} |F_{lane}|
+      \label{eq:conf_reward}
+      \end{equation}
+
+      决策一致性上，惩罚动作序列中与上一时刻重叠部分的二范数；
+      \begin{equation}
+        r_{\text{cons}} = - \frac{1}{T-1} \sum_{k=1}^{T-1} \left(\lVert F_{acc}^{\tau}(k) - F_{acc}^{\tau-1}(k+1)\rVert^2_2 - \lVert F_{lane}^{\tau}(k) - F_{lane}^{\tau-1}(k+1)\rVert^2_2\right) 
+      \end{equation}
+      
+      规则上，鼓励行驶在右侧，并惩罚超速；
+      \begin{equation}
+        r_{\text{rule}} = - \text{GraphSum}\left(\max(v_{veh} - v_{lim},0) + k_{lane} \right) 
+        \label{eq:rule_reward}
+      \end{equation}
+
+      为保证车辆跟随导航路径，导航奖励定义为
+      \begin{equation}
+        r_{\text{nav}} = \text{GraphSum}\left(c_{nav}\right) 
+        \label{eq:nav_reward}
+      \end{equation}
+      
+  \subsection{防侧翻换道运动轨迹生成}
+  \label{subsection:antirollover_traj_gen_cloud}
+    在行为决策后，云端需根据行为决策结果向车端下发连续参考轨迹。纵向速度只需用期望加速度指令进行积分即可，而对于横向换道指令，则需考虑车辆侧翻特性生成连续轨迹。本小节基于适用于平稳工况下的简化线性车辆侧倾模型，推导使近似LTR最小化的轨迹优化方法，用于平滑行为决策结果并输出预测性行驶时空轨迹，保障车辆侧翻稳定性。当车端实时仲裁云端推荐指令可执行时，将直接跟踪云端推荐轨迹行驶。
+
+
+    本小节提出了基于简化的三阶车辆侧倾模型推导的使得侧向载荷转移率最小化轨迹表达式的优化计算方法。如图~\ref{fig:ltr_feature}所示，根据液罐车的实际LTR阶跃响应特性，可以将其视为侧向加速度输入的欠阻尼多阶惯性环节，从而构建简化的液罐车侧向动力学模型。
+    
+    通过以下步骤获取轨迹表达式$\tau_{cloud}$：步骤1：选择高阶多项式（大于5阶）；步骤2：根据云端预测性决策结果指定边界约束条件；步骤3：根据剩余自由度构建针对近似LTR计算的优化模型；步骤4：求解优化模型得到轨迹。
+
+    \begin{figure}
+      \centering
+      \subcaptionbox{固液车辆LTR特性对比\cite{wanying2020antirolover} \label{fig:ltr_feature}}
+        {\includegraphics[width=0.40\linewidth]{fig/chap3/ltr_feature.png}}
+      \subcaptionbox{六阶多项式轨迹优化 \label{fig:6_order_approx}}
+        {\includegraphics[width=0.58\linewidth]{fig/chap3/6_order_approx.png}}
+      \caption{液罐车侧倾特性与六阶多项式轨迹优化}
+      \label{fig:ltr_feature_6_order_approx}
+    \end{figure}
+
+    本文采用的高阶多项式为6阶多项式，如式\eqref{eq:128}。相比于简单形状的如Dubins曲线或正弦曲线，其曲率更连续且具有可调性；相比于多项式参数曲线，如羊角螺线，其终点位置可保证，无需打靶法调整；相比于插值点或控制点曲线，其优化自由度相对较少，易于操作。故本文选择便于给出始末点约束，曲率连续且在较少自由度下实现多样化轨迹的6阶多项式曲线。
+    \begin{equation}
+    \begin{cases}
+    y(t) = b_0 + b_1 t + b_2 t^2 + b_3 t^3 + b_4 t^4 + b_5 t^5 + b_6 t^6 \\
+    x(t) = a_0 + a_1 t + a_2 t^2 + a_3 t^3 + a_4 t^4 + a_5 t^5 + a_6 t^6
+    \end{cases}
+    \label{eq:128}
+    \end{equation}
+    一共包含14个待定系数$a_0,a_1,\dots,a_6$和$b_0,b_1,\dots,b_6$。
+
+    根据前述决策模型计算得到的决策生成每一次换道过程曲线的起始和终止点约束。本例中假设所有换道持续4s，即$t_f = 4$（假设从第$t_0$秒换道，将时间轴平移到$t_0$秒处以方便问题构建），另外可以根据换道原车道和目标车道确定起止点分别的横向位置，根据速度信息可以确定起止点分别的纵向位置。约束起止点的横向速度、加速度都为0来满足轨迹可行性和行驶平稳性。
+
+    约束方程如下：
+    \begin{equation}\text{换道起始点约束：}
+    \begin{cases}
+    x(0) = x_0 \\
+    y(0) = y_0 \\
+    \dot{x}(0) = v_{ox} \\
+    \dot{y}(0) = v_{oy} \\
+    \ddot{x}(0) = a_{ox} \\
+    \ddot{y}(0) = a_{oy}
+    \end{cases}
+    \quad
+    \text{换道终止点约束：}
+    \begin{cases}
+    x(t_f) = x_f \\
+    y(t_f) = y_f \\
+    \dot{x}(t_f) = v_{fx} \\
+    \dot{y}(t_f) = v_{fy} \\
+    \ddot{x}(t_f) = a_{fx} \\
+    \ddot{y}(t_f) = a_{fy}
+    \end{cases}
+    \label{eq:129}
+    \end{equation}
+
+    代入换道初始结点约束条件可以直接求解得到系数$a_0,a_1,a_2$和$b_0,b_1,b_2$，为：$a_0 = x_0, b_0 = y_0, a_1 = v_{ox}, b_1 = v_{oy}, a_2 = \frac{1}{2}a_{ox}, b_2 = \frac{1}{2}a_{oy}$。
+
+    系数$a_3,a_4,a_5$和$b_3,b_4,b_5$与剩余系数$a_6,b_6$耦合在一起，代入终止点条件可以将系数$a_3,a_4,a_5$和$b_3,b_4,b_5$用剩余系数$a_6,b_6$表示：
+    \begin{equation}
+    \begin{cases}
+    c_1 - t_f^4 b_6 = t_f b_3 + t_f^2 b_4 + t_f^3 b_5 \\
+    c_2 - 6t_f^4 b_6 = 3t_f b_3 + 4t_f^2 b_4 + 5t_f^3 b_5 \\
+    c_3 - 30t_f^4 b_6 = 6t_f b_3 + 12t_f^2 b_4 + 20t_f^3 b_5
+    \end{cases}
+    \label{eq:130}
+    \end{equation}
+
+    \noindent 其中，系数为
+    \begin{equation}
+    \begin{cases}
+    c_1 = \frac{1}{t_f^2}\left( (y_f - y_0) - v_{oy} t_f - \frac{1}{2}a_{oy} t_f^2 \right) \\
+    c_2 = \frac{1}{t_f}\left( (v_{fy} - v_{oy}) - a_{oy} t_f \right) \\
+    c_3 = (a_{fy} - a_{oy})
+    \end{cases}
+    \label{eq:131}
+    \end{equation}
+
+    \begin{equation}
+    \boldsymbol{c} = [c_1\ c_2\ c_3]^T, \boldsymbol{d} = [t_f^4\ 6t_f^4\ 30t_f^4]^T
+    \label{eq:132}
+    \end{equation}
+    
+    \begin{equation}
+    \boldsymbol{A} = \begin{bmatrix}
+    t_f & t_f^2 & t_f^3 \\
+    3t_f & 4t_f^2 & 5t_f^3 \\
+    6t_f & 12t_f^2 & 20t_f^3
+    \end{bmatrix}, \quad \boldsymbol{A}^{-1} = \begin{bmatrix}
+    \frac{10}{t_f} & -\frac{4}{t_f} & \frac{1}{2t_f} \\
+    -\frac{15}{t_f^2} & \frac{7}{t_f^2} & -\frac{1}{t_f^2} \\
+    \frac{6}{t_f^3} & -\frac{3}{t_f^3} & \frac{1}{2t_f^3}
+    \end{bmatrix}
+    \label{eq:133}
+    \end{equation}
+
+    \begin{equation}
+    [b_3\ b_4\ b_5]^T = \boldsymbol{A}^{-1}\boldsymbol{c} - \boldsymbol{A}^{-1}\boldsymbol{d} b_6
+    \label{eq:134}
+    \end{equation}
+
+    故而$x(t)$与$y(t)$中只有剩余系数$a_6,b_6$待定，一旦确定即可得到一条具体的曲线。得到轨迹后即可计算轨迹的侧向加速度$a_y$。
+
+    根据速度曲线和曲率曲线的表达式：
+    \begin{equation}
+    v(t) = \sqrt{\dot{x}(t)^2 + \dot{y}(t)^2}
+    \quad
+    \kappa(t) = \frac{\dot{x}(t)\ddot{y}(t) - \dot{y}(t)\ddot{x}(t)}{\left( \dot{x}(t)^2 + \dot{y}(t)^2 \right)^{\frac{3}{2}}}
+    \label{eq:136}
+    \end{equation}
+
+    即可获得侧向加速度：
+    \begin{equation}
+    a_y(t) = v(t)^2 \kappa(t) = \frac{\dot{x}(t)\ddot{y}(t) - \dot{y}(t)\ddot{x}(t)}{\sqrt{\dot{x}(t)^2 + \dot{y}(t)^2}}
+    \label{eq:137}
+    \end{equation}
+
+    采用的近似LTR计算方法为将LTR近似为时域轨迹侧向加速度的二阶惯性环节，该做法的可行性将在\ref{kinodynamic_model}节详细论证。
+
+    \begin{equation}
+    \ddot{\tilde{\text{LTR}}}(t) + 2\zeta\omega_n \dot{\tilde{\text{LTR}}}(t) + \omega_n^2 \tilde{\text{LTR}}(t) = a_y(t)
+    \label{eq:138}
+    \end{equation}
+    可通过递推最小二乘法识别简化LTR模型的系数$\zeta$和$\omega_n$。
+
+    针对给定的剩余系数$a_6,b_6$生成的其他系数可以直接得到$a_y(t)$，根据输入$a_y(t)$求解\eqref{eq:138}微分方程可以得到$\tilde{\text{LTR}}(t)$。
+
+    加入车辆转向执行器约束：轨迹前轮转角计算如下：
+    \begin{equation}
+    \delta(t) = \arctan\left( L \kappa(t) \right)
+    \label{eq:139}
+    \end{equation}
+
+    \noindent 其中，$L$为牵引车轴距，前轮转角约束和转动角速度约束如下：
+    \begin{equation}
+    \begin{cases}
+    |\delta(t)| < \delta_{max} \\
+    |\dot{\delta}(t)| < \dot{\delta}_{max}
+    \end{cases}
+    \label{eq:140}
+    \end{equation}
+
+    构建优化问题如下：
+    \begin{equation}
+    \begin{aligned}
+    \min_{a_6,b_6} &\ \lVert \tilde{\text{LTR}}(t) \rVert_\infty \\
+    \text{s.t.} \quad & \text{\eqref{eq:138}系统动力学} \\
+    & \text{\eqref{eq:137}侧向加速度计算} \\
+    & \text{\eqref{eq:140}执行器约束}
+    \end{aligned}
+    \label{eq:141}
+    \end{equation}
+    
+
+    \begin{figure}
+      \centering
+      \subcaptionbox{固体货物车辆防侧翻轨迹 \label{fig:solid_traj}}
+        {\includegraphics[width=0.49\linewidth]{fig/chap3/solid_traj.jpg}}
+      \subcaptionbox{液罐车防侧翻轨迹 \label{fig:liquid_traj}}
+        {\includegraphics[width=0.49\linewidth]{fig/chap3/liquid_traj.jpg}}
+      \caption{固体货物车辆与液罐车防侧翻轨迹对比}
+      \label{fig:traj_compare}
+    \end{figure}
+    利用各种数值方法均可快速求解本问题。求解后得到最优剩余系数$a_6,b_6$用于生成平滑可执行且最小化LTR的轨迹。对于固体货物车辆，设置阻尼比$\zeta = 0.8$，自然频率$\omega_n = \SI{2.3}{Hz}$，求解结果如图~\ref{fig:solid_traj}所示，防侧翻轨迹与五次多项式重合；而对于液罐车，设置阻尼比$\zeta = 0.4$，自然频率$\omega_n = \SI{1.8}{Hz}$，求解出的轨迹如图~\ref{fig:liquid_traj}所示，最优LTR换道轨迹倾向于先缓慢后激烈的非对称轨迹特性，不同速度工况下相比5次多项式的对称轨迹最大LTR降低\SIrange{10}{20}{\percent}左右。
+
+\section{车端防侧翻避障应急轨迹规划}
+  \label{kinodynamic_model}
+  云端给出的参考轨迹在无法可靠预测的时延与丢包等通信故障条件下可能并非最优，尤其当周车行为发生突变时，云端轨迹规划可能无法及时响应，导致推荐轨迹不可行。故在车端需在考虑云端建议的基础上，根据自车实时感知情况进行高频防侧翻避障应急轨迹规划。车辆根据感知结果自主判断云端建议是否可执行，若不可执行，则启动车端应急轨迹规划将重新生成一条考虑侧翻特性的紧急避障轨迹用于跟踪。
+  
+  车端防侧翻规划与跟踪控制由两个环节组成：本节的防侧翻避障轨迹规划，以及第\ref{chap04_antirollover_control}章的车端防侧翻轨迹跟踪控制。二者共同目标是在满足动力学和执行器约束的前提下生成可跟踪的平滑轨迹，并保证牵引车与挂车同时避障。
+
+  第\ref{chap04_antirollover_control}章将建立更精确的车液耦合模型，用于预测等效LTR侧翻指标。MPC跟踪控制器将该指标作为输出量并加入约束，使防侧翻要求在危险情况下优先于轨迹跟踪精度。与之对应，本节提出的车端规划方法侧重于在规划阶段提高轨迹的可跟踪性。该方法通过规控反馈将LTR指标和执行器约束引入规划器，并依据LTR预测结果约束候选轨迹，避免规划轨迹触发侧翻风险阈值。
+
+  对于牵引车与挂车同时避障问题，本文在规划层同时考虑两者的占用边界。规划器输出牵引车轨迹后，控制层只需保证牵引车稳定跟踪，即可间接保证挂车避障。该处理方式将牵引车轨迹跟踪、挂车避障与防侧翻约束前移至规划层协调，降低了跟踪控制层处理牵引车与挂车目标冲突的复杂度。
+
+  现有半挂车轨迹规划方法仍难以直接适用于半挂液罐车。低速泊车类方法多采用运动学模型，难以覆盖高速行驶下的轮胎非线性和侧翻风险；面向高速场景的方法又常将牵引车跟踪与挂车避障分开处理，冲突协调较复杂。因此，本章首先建立面向规划器的半挂液罐车简化模型，再介绍车端避障防侧翻规划的完整流程。
+
+  \subsection{半挂液罐车简化模型建立}
+    为在运动规划器中更好地预测车辆状态变化，本节建立了半挂液罐车简化模型。该模型从简化半挂车运动模型出发，分析运动学模型在高速时缺少的动态，并通过引入运动-动力学耦合模型以及线性侧向动力学模型来完善运动学模型，在尽量低的实时计算负担下提高预测精度。
+
+    \subsubsection*{(1)半挂车运动学模型}
+      用于规划器的建模设计为更加精确的非线性模型，因为在大曲率转向等情况下，线性模型无法很好预测车辆轨迹动态及牵引车挂车轨迹的差异情况。对于半挂车低速泊车场景下的规划方法普遍采用运动学模型描述车辆轨迹动态，运动学模型如图~\ref{fig:kinematic}所示。
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.5\linewidth]{fig/chap3/kinematic.png}
+        \caption{半挂车运动学模型}
+        \label{fig:kinematic}
+      \end{figure}
+
+      假设各轴无侧滑，则可以认为各个车轴中点的轴向速度为0：
+      \begin{equation}
+      \begin{cases}
+      \dot{X}_{1r}\sin\psi_1 - Y_{1r}\cos\psi_1 = 0 \\
+      X_{1f}\sin(\psi_1 + \delta) - Y_{1f}\cos(\psi_1 + \delta) = 0 \\
+      \dot{X}_{2r}\sin\psi_2 - Y_{2r}\cos\psi_2 = 0
+      \end{cases}
+      \label{eq:142}
+      \end{equation}
+
+      首先是空间位置关系，我们用下标$1,2$表示牵引车或挂车，用下标$f,r$表示前轴或后轴，对于挂车来说其前轴就是第五轮，则牵引车前轴中心$(X_{1f},Y_{1f})$与后轴中心$(X_{1r},Y_{1r})$的关系是：
+      \begin{equation}
+      \begin{cases}
+      X_{1f} = X_{1r} + L_1 \cos\psi_1 \\
+      Y_{1f} = Y_{1r} + L_1 \sin\psi_1
+      \end{cases}
+      \label{eq:143}
+      \end{equation}
+
+      第五轮中心$(X_{2f},Y_{2f})$与牵引车后轴中心$(X_{1r},Y_{1r})$的关系为：
+      \begin{equation}
+      \begin{cases}
+      X_{2f} = X_{1r} + L_h \cos\psi_1 \\
+      Y_{2f} = Y_{1r} + L_h \sin\psi_1
+      \end{cases}
+      \label{eq:144}
+      \end{equation}
+
+      $L_h$即牵引车等效后轴到第五轮的距离。
+
+      挂车等效轴中心与牵引车等效后轴中心之间的关系为：
+      \begin{equation}
+      \begin{cases}
+      X_{2r} = X_{1r} + L_h \cos\psi_1 - L_2 \cos\psi_2 \\
+      Y_{2r} = Y_{1r} + L_h \sin\psi_1 - L_2 \sin\psi_2
+      \end{cases}
+      \label{eq:145}
+      \end{equation}
+
+      挂车等效轴中心与牵引车后轴之间的距离为$L_2$。
+
+      则牵引车前轴中心的运动学方程为：
+      \begin{equation}
+      \begin{cases}
+      \dot{X}_{1f} = v_{1x} \cos\psi_1 - L_1\dot{\psi}_1 \sin\psi_1 \\
+      \dot{Y}_{1f} = v_{1x} \sin\psi_1 + L_1\dot{\psi}_1 \sin\psi_1
+      \end{cases}
+      \label{eq:146}
+      \end{equation}
+
+      牵引车等效后轴的运动学方程为：
+      \begin{equation}
+      \begin{cases}
+      \dot{X}_{1r} = v_{1x} \cos\psi_1 \\
+      \dot{Y}_{1r} = v_{1x} \sin\psi_1
+      \end{cases}
+      \label{eq:147}
+      \end{equation}
+
+      将式\eqref{eq:146}代入式\eqref{eq:142}中化简，即可得到牵引车的航向角运动学方程为：
+      \begin{equation}
+      \dot{\psi}_1 = \frac{v_{1x}}{L_1}\tan\delta
+      \label{eq:148}
+      \end{equation}
+
+      挂车等效后轴的运动学方程为：
+      \begin{equation}
+      \begin{cases}
+      \dot{X}_{2r} = v_{1x} \cos\psi_1 - L_h\dot{\psi}_1 \sin\psi_1 + L_2\dot{\psi}_2 \sin\psi_2 \\
+      \dot{Y}_{2r} = v_{1x} \sin\psi_1 + L_h\dot{\psi}_1 \cos\psi_1 - L_2\dot{\psi}_2 \cos\psi_2
+      \end{cases}
+      \label{eq:149}
+      \end{equation}
+
+      将式\eqref{eq:149}代入\eqref{eq:142}化简，即可得到挂车的航向角运动学方程为：
+      \begin{equation}
+      \dot{\psi}_2 = \frac{v_{1x}}{L_2}\left( \frac{L_h}{L_1}\tan\delta \cos\gamma_{g} + \sin\gamma_{g} \right)
+      \label{eq:150}
+      \end{equation}
+
+      \noindent 其中，定义铰接角$\gamma_{g} = \psi_1 - \psi_2$。
+
+      综上所述，得到铰接点位于牵引车等效后轴中点前侧的半挂式车辆运动学模型：
+      \begin{equation}
+      \begin{cases}
+      \dot{X}_{1r} = v_{1x} \cos\psi_1 \\
+      \dot{Y}_{1r} = v_{1x} \sin\psi_1 \\
+      \dot{\psi}_1 = \frac{v_{1x}}{L_1}\tan\delta \\
+      \dot{\psi}_2 = \frac{v_{1x}}{L_2}\left( \frac{L_h}{L_1}\tan\delta \cos\gamma_{g} + \sin\gamma_{g} \right)
+      \end{cases}
+      \label{eq:151}
+      \end{equation}
+
+    \subsubsection*{(2)运动动力学耦合模型}
+      在泊车等低速场景中，运动学模型通常能够满足轨迹预测需求；但在速度较高、侧向载荷转移率较大的高动态情况下，轮胎非线性特性无法忽略，单纯的运动学预测结果与实际偏差较大。对于规划器而言，由于下层轨迹跟踪控制器会以动力学模型为基础控制牵引车较好地跟随轨迹，牵引车运动在规划层可近似视为符合运动学模型；其前提是给牵引车规划的轨迹需要满足基本动力学约束与执行器动态约束，否则控制器无法跟踪。为尽可能降低控制器复杂度，控制器本身不直接处理挂车轨迹跟踪和避障问题，因此需要在规划层考虑基于牵引车运动学输入的挂车轮胎非线性动力学特性，并对原有运动学模型进行修正，乘以随速度变化的尾部放大系数$K_v$，形成半挂车运动-动力学耦合模型（Coupled Kino-Dynamic Semi-trailer Model, CKDS）。
+
+      \begin{equation}
+      \begin{cases}
+      \dot{X}_{1r} = v_{1x} \cos\psi_1 \\
+      \dot{Y}_{1r} = v_{1x} \sin\psi_1 \\
+      \dot{\psi}_1 = \frac{v_{1x}}{L_1}\tan\delta \\
+      \dot{\psi}_2 = K_v \frac{v_{1x}}{L_2}\left( \frac{L_h}{L_1}\tan\delta \cos\gamma_{g} + \sin\gamma_{g} \right), K_v = \left( 1 - \frac{m_2 v_{1x}^2 e}{L_1 L_2 k_3} \right)
+      \end{cases}
+      \label{eq:152}
+      \end{equation}
+
+      \begin{figure}
+        \centering
+        \subcaptionbox{半挂车运动动力学耦合模型 \label{fig:kinodynamic}}
+          {\includegraphics[width=0.5\linewidth]{fig/chap3/kinodynamic.png}}
+        \subcaptionbox{不同阶线性LTR模型对比 \label{fig:order1_4}}
+          {\includegraphics[width=0.49\linewidth]{fig/chap3/order1_4.png}}
+        \caption{半挂液罐车简化运动动力学模型}
+        \label{fig:kynodynamic_tank_truck_model}
+      \end{figure}
+
+
+
+
+
+
+      详细推导过程如下：如图~\ref{fig:kinodynamic}所示，半挂车进行匀速圆周运动，第五轮是牵引车与挂车的速度重合点，以速度$v_h$运动，$v_h$与牵引车纵向成$\delta^{\prime}$夹角，则根据圆周运动的特性，各点圆周运动速度之比等于各点到圆心$O$的距离之比。
+      \begin{equation}
+      \frac{R'}{R} = \frac{v_h}{v_{1x}} = \cos\delta^{\prime}
+      \label{eq:153}
+      \end{equation}
+      \noindent 其中，根据牵引车的运动学可知$\tan\delta = \frac{L}{R}$，故
+      \begin{equation}
+      \delta^{\prime} = \arctan\left( \frac{L_h}{L_1}\tan\delta \right) = \arctan\left( \frac{L_h \dot{\psi}_1}{v_{1x}} \right)
+      \label{eq:154}
+      \end{equation}
+      利用三角恒等式$\cos(\arctan x) = \frac{1}{\sqrt{1+x^2}}$，令$x = \frac{L_h}{L_1}\tan\delta$，则
+      \begin{equation}
+      v_h = \frac{v_{1x}}{\cos\delta^{\prime}} = v_{1x}\sqrt{1 + \left( \frac{L_h}{L_1}\tan\delta \right)^2}
+      \label{eq:155}
+      \end{equation}
+
+      接下来就可以解耦问题，只关注带有动力学响应的挂车部分，而第五轮速度已经由上式求得了。挂车的动力学特性主要反映了轮胎的侧偏特性导致的轨迹外偏，而轮胎选用线性轮胎模型：
+      \begin{equation}
+      F_y^3 = k_3 \alpha_3
+      \label{eq:156}
+      \end{equation}
+      \noindent 其中，$k_3$是侧偏刚度，$\alpha_3$为挂车等效后轴侧偏角。由于刚体沿着某一直线的速度一定相同，故将第五轮的已知速度$v_h$沿着挂车纵向与横向分解：
+      \begin{equation}
+      \begin{cases}
+      v_h^x = v_h \cos(\delta^{\prime} + \gamma_{g}) \\
+      v_h^y = v_h \sin(\delta^{\prime} + \gamma_{g})
+      \end{cases}
+      \label{eq:157}
+      \end{equation}
+      挂车等效后轴的速度沿着挂车纵向的分量也为$v_h^x$。而横向速度可以用该点的牵连速度分量$v_h^y$与相对运动速度分量表示，则可以表示挂车等效后轴的侧偏角为：
+      \begin{equation}
+      \alpha_3 \approx \tan\alpha_3 = \frac{v_h \sin(\delta^{\prime} + \gamma_{g}) - \dot{\psi}_2 L_2}{v_h \cos(\delta^{\prime} + \gamma_{g})} = \tan(\delta^{\prime} + \gamma_{g}) - \frac{\dot{\psi}_2 L_2}{v_h \cos(\delta^{\prime} + \gamma_{g})}
+      \label{eq:158}
+      \end{equation}
+      接下来，对挂车的受力情况进行分析，可知挂车在第五轮受到牵引车的作用力、质心处由于圆周运动受到达朗贝尔力$F_{m2}$、后轴受到侧向力$F_y^3$与纵向力$F_x^3$，这些力合力为零。
+      \begin{equation}
+      F_y^3 \cos\theta_1 + F_x^3 \sin\theta_1 \approx k_3 \alpha_3 \cos\theta_1 = \frac{e}{L_2}F_{m2} = \frac{e m_2 v_2^2}{L_2 x} \approx \frac{e m_2 v_1^2}{L_2 L_1} \tan\delta \left( 1 - \frac{e}{L_1} \tan\delta \sin\gamma_{g} \right)
+      \label{eq:159}
+      \end{equation}
+
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/kinodynamic_results.png}
+        \caption{3种不同工况下运动动力学耦合模型与运动学模型对比}
+        \label{fig:kinodynamic_results}
+      \end{figure}
+      最后一步的近似是基于：
+      \begin{equation}
+      \frac{v_2}{v_{1x}} = \frac{x}{R} \approx \frac{(R - e \sin\gamma_{g})}{R} = \left( 1 - \frac{e}{L_1} \tan\delta \sin\gamma_{g} \right)
+      \label{eq:160}
+      \end{equation}
+      基于式\eqref{eq:159}进一步化简：
+      \begin{equation}
+      \begin{aligned}
+      &k_3 \tan(\delta^{\prime} + \gamma_{g}) - \frac{\dot{\psi}_2 L_2 k_3}{v_1 \cos(\delta^{\prime} + \gamma_{g})} \approx \frac{e m_2 v_1^2}{L_2 L_1} \tan\delta \\
+      \Longleftrightarrow~ &- \tan(\delta^{\prime} + \gamma_{g}) + \frac{\dot{\psi}_2 L_2}{v_1 \cos(\delta^{\prime} + \gamma_{g})} = -\frac{e m_2 v_1^2}{L_2 L_1 k_3} \tan\delta \\
+      \Longleftrightarrow~ &\frac{\dot{\psi}_2 L_2}{v_1} = -\frac{e m_2 v_1^2}{L_2 L_1 k_3} \tan\delta \cos(\delta^{\prime} + \gamma_{g}) + \sin(\delta^{\prime} + \gamma_{g}) \\
+      \Longleftrightarrow~ &\dot{\psi}_2 = \frac{v_1}{L_2} \left( -\frac{e m_2 v_1^2}{L_2 L_1 k_3} \tan\delta \cos(\delta^{\prime} + \gamma_{g}) + \sin(\delta^{\prime} + \gamma_{g}) \right)
+      \end{aligned}
+      \label{eq:161}
+      \end{equation}
+
+      将其与式\eqref{eq:151}进行比较，$\dot{\psi}_2 = \frac{v_{1x}}{L_2}\left( \frac{L_h}{L_1}\tan\delta \cos\gamma_{g} + \sin\gamma_{g} \right)$，得到修正后的横摆角速度为：
+      \begin{equation}
+      \dot{\psi}_2 = K_v \frac{v_1}{L_2} \left( \frac{L_h}{L_1}\tan\delta \cos\gamma_{g} + \sin\gamma_{g} \right), K_v = \left( 1 - \frac{m_2 v_{1x}^2 e}{L_1 L_2 k_3} \right)
+      \label{eq:162}
+      \end{equation}
+      \noindent 其中，由于侧偏刚度$k_3$为负值，故$K_v \geq 1$；当$v_1 \to 0$时，$K_v \to 1$；当$v_1 \to \infty$时，$K_v \to \infty$。该系数用于表征侧向加速度增大时滑移率逐渐增加的趋势。
+
+      \subsubsection*{(3)简化侧向线性动力学模型}
+
+      规划器在考虑牵引车与挂车避障的同时需要考虑车辆的侧翻动态，但是又需要避免模型过于复杂，本小节特征在于直接建模整车侧向载荷转移率LTR，并采用线性状态空间方程形式，选择至少3阶及以上线性系统表征LTR动态。线性LTR模型的输入为牵引车后轴与挂车等效后轴侧向加速度的质量加权求和。
+
+      \begin{equation}
+      \begin{aligned}
+      a_y &= \frac{v_{1x}^2}{m_1 + m_2} \left( \frac{m_1}{L_1} \tan\delta + \frac{m_2}{L_2} \cos^2 \gamma_{g} \sin\gamma_{g} \right) \\
+      &= \frac{m_1 v_{1x}}{m_1 + m_2} \dot{\psi}_1 + \frac{m_2 v_{1x}^2}{L_2(m_1 + m_2)} \cos^2 \gamma_{g} \sin\gamma_{g}
+      \end{aligned}
+      \label{eq:163}
+      \end{equation}
+
+
+      经过处理后的加速度直接经过三阶线性环节即可得到LTR。三阶线性环节设计如下：
+      设状态量$X = [x_1~ x_2~ x_3]^T$，输入量$u = [a_y~ \dot{\gamma_{g}}~ \gamma_{g}]^T$，输出是$y = \text{LTR}$则：
+      \begin{equation}
+      \begin{cases}
+      \dot{X} = AX + Bu \\
+      y = CX
+      \end{cases}
+      \label{eq:164}
+      \end{equation}
+      \noindent 其中，矩阵参数为
+      \begin{equation}
+      A = \begin{bmatrix}
+      0 & 1 & 0 \\
+      0 & 0 & 1 \\
+      a_1 & a_2 & a_3
+      \end{bmatrix}, B = \begin{bmatrix}
+      b_{11} & b_{12} & b_{13} \\
+      b_{21} & b_{22} & b_{23} \\
+      b_{31} & b_{32} & b_{33}
+      \end{bmatrix}, C = [1~ 0~ 0]
+      \label{eq:165}
+      \end{equation}
+      需要通过系统辨识来获得。选择三阶系统的原因是其刚好可以表达描述车辆LTR动力学所需的信息，且不会很复杂。如图~\ref{fig:order1_4}所示，对左转弯工况下（将在第\ref{chap04_antirollover_control}章的仿真部分详细介绍）采用\SIrange{1}{4}{}阶传递函数线性模型直接拟合单输入单输出（Single Input Single Output, SISO）关系，发现一阶与二阶模型在大曲率上时间的晃动下无法有效拟合，而平衡精度与计算复杂度同时避免过拟合，对于规划器而言采用三阶系统是最优选择。
+      
+      一共9个参数需要识别，通过包含低速、中速、高速小曲率和低速大曲率行驶的LTR估计数据即可得到。半挂式液罐车的运动-动力学耦合模型整体可以表示为：
+      \begin{equation}
+      \begin{cases}
+      \dot{X}_{1r} = v_{1x} \cos\psi_1 \\
+      \dot{Y}_{1r} = v_{1x} \sin\psi_1 \\
+      \dot{\psi}_1 = \frac{v_{1x}}{L_1}\tan\delta \\
+      \dot{\gamma_{g}} = \dot{\psi}_1 - \frac{K_v}{L_2} \left( L_h \psi_1 \cos\gamma_{g} + v_{1x} \sin\gamma_{g} \right), K_v = \left( 1 - \frac{m_2 v_{1x}^2 e}{L_1 L_2 k_3} \right) \\
+      \dot{\mathcal{L}} = \mathcal{L}_a + c_{11} v_{1x} \psi_1 + c_{21} v_{1x}^2 \cos^2 \gamma_{g} \sin\gamma_{g} + b_{31} \gamma_{g}, \quad c_{1i} = \frac{b_{1i} m_1}{m_1 + m_2}, c_{2i} = \frac{b_{1i} m_2}{L_2(m_1 + m_2)} \\
+      \dot{\mathcal{L}}_a = \mathcal{L}_b + \left( c_{12} v_{1x} + b_{22} - \frac{b_{22} L_h}{L_2} \cos\gamma_{g} \right) \psi_1 + \left( c_{22} v_{1x}^2 \cos^2 \gamma_{g} - \frac{b_{22} v_{1x}}{L_2} \right) \sin\gamma_{g} + b_{32} \gamma_{g} \\
+      \dot{\mathcal{L}}_b = a_1 \mathcal{L} + a_2 \mathcal{L}_a + a_3 \mathcal{L}_b + c_{13} v_{1x} \psi_1 + c_{23} v_{1x}^2 \cos^2 \gamma_{g} \sin\gamma_{g}
+      \end{cases}
+      \label{eq:166}
+      \end{equation}
+
+      在持续加速5次不同程度双移线的5-Pins工况、左转弯工况、高速双移线工况共3种典型工况下（工况同样将在第\ref{chap04_antirollover_control}章的仿真部分详细介绍），对简化液罐车运动动力学耦合模型效果进行验证。如图~\ref{fig:kinodynamic_results}所示，引入尾部动力学后挂车轨迹预测误差与LTR动力学预测误差水平都得到有效降低。
+  \subsection{约束迭代LQR问题构造}
+    基于上述模型构建的防侧翻避障轨迹规划问题是多变量、多约束的非凸优化问题，如序列二次规划（Sequential Quadratic Programming，SQP）\cite{gill1981practical}是此类问题的通用求解器之一，通过不断将原始问题近似为一系列QP问题实现求解，但由于并未针对问题的特殊形式进行优化，故在求解时间上相对较慢。由于轨迹规划问题符合最优控制问题基本框架，本小节将提出改进的约束迭代线性二次调节器（constrained iterative linear quadratic regulator, CILQR）求解轨迹规划问题，其通过迭代求解线性二次调节器问题实现初始解向真值的收敛，并通过逐渐加强的控制屏障函数（Control Barrier Function, CBF）保证约束的施加并逐渐演化无限趋近于完全约束问题，为以保证约束满足和初解包容，避免了原始CILQR方法对初解完全可行的要求。
+
+    标准iLQR问题形式为：
+    \begin{equation}
+      \begin{aligned}
+      \min_{u_0,\cdots,u_{N_p-1}} J &= \frac{1}{2}x^T_{N_p}Q_{N_p}x_{N_p} + x^T_{N_p}p_{N_p} + q_{N_p} + \sum_{k=0}^{N_p-1} \left(\frac{1}{2}x^T_kQ_kx_k + x_k^Tp +q + u^T_k R_k u_k + u_k^Tr \right) \\
+      \text{s.t.}\quad x_{k+1} &= f(x_k,u_k)\quad
+      x_0 = x^{start}
+      \end{aligned}
+    \end{equation}
+    \noindent 其中，$N_p$为预测步数，$Q_{N_p}$为终端状态权重矩阵，$p_{N_p}$为终端状态权重向量，$q_{N_p}$为终端状态权重标量，$Q_k$为第$k$步状态权重矩阵，$p_k$为第$k$步状态权重向量，$q_k$为第$k$步状态权重标量，$R_k$为第$k$步输入权重矩阵，$r_k$为第$k$步输入权重向量，$f(x_k,u_k)$为状态转移方程，而$x^{start}$为系统初始状态约束。
+
+    标准iLQR问题不允许其他约束，但为满足避障、执行器饱和以及状态量限制等需求，必须对问题引入额外约束。Chen等\cite{chen2017CILQR_1,chen2019CILQR_2}通过CBF实现将约束问题构造为标准iLQR问题，其中的CBF形式为：
+    \begin{equation}
+      b_k^x=q_1 \exp(q_2 f_k^x)\quad f_k^x(x_k + \increment x_k)\approx (\increment x_k)^T\nabla c_k^x(x_k) + c_k^x(x_k)
+    \end{equation}
+    \noindent 其中，$q_1$为CBF的缩放因子，$q_2$为CBF的指数因子，$f_k^x(x_k + \increment x_k)$为第$k$步CBF的一阶泰勒展开近似表达式，$\nabla c_k^x(x_k)$为第$k$步CBF的梯度向量，$c_k^x(x_k)$为第$k$步CBF的标量项。通过将$b_k$引入目标函数即可将约束问题转化为无约束ILQR问题（由于将约束替换为CBF惩罚项，实际为软约束，即无法从理论上完全保证求解满足约束，但也可以避免硬约束下的无解情况）。
+
+    利用上述约束，为保证侧翻稳定性，对车辆LTR以及铰接角$\gamma_{g}$都进行了CBF约束，其中为补偿线性LTR预测模型可能的误差，将近似LTR状态绝对值的CBF约束上限$\mathcal{L}_{lim}$设置为随时间指数衰减的形式:
+    \begin{equation}
+      \mathcal{L}_{lim} = \mathcal{L}_{lim}^0\exp(-\frac{t}{\tau_{decay}})
+      \label{eq:ltr_cbf}
+    \end{equation}
+    \noindent 其中，$\mathcal{L}_{lim}^0$为CBF约束的初始上限，$\tau_{decay}$为CBF约束上限衰减时间常数。
+
+
+  \subsection{场景构建与关键周车筛选方法}
+    本节将详细讨论车端根据自车预测结果进行防侧翻避障轨迹规划流程中的关键场景构建方法。
+    
+    首先自车与运控平台以一定周期进行无线通信，从云端获取如\ref{subsection:antirollover_traj_gen_cloud}节所述的长时域预测性轨迹规划结果$\tau_{cloud}$，长时域预测性轨迹规划结果的时间$T$应大于等于车端规划出的轨迹$t_{veh}$的时间长度$t_{veh}$；
+
+    以云端规划结果为自车动作的条件下，利用预测模型预测周围预设范围内每辆车的多模态轨迹$\mathcal{T} = {\tau_i},~\tau_i = \{\tau_i^1,\tau_i^2,\dots,\tau_i^{m_i}\}, i=1,2,\dots,N_{veh}$及每种模态轨迹的概率$p_i = \{p_i^1,p_i^2,\dots,p_i^{m_i}\}, \sum_{j=1}^{m_i} p_i^j = 1$，其中下标$i$表示第$i$辆车，$m_i$表示第$i$辆车多模态轨迹的数量，$m_i \geq 1$，假设预设范围内存在$N_{veh}$辆车，并基于其与步骤1的长时域预测性规划结果按照$\text{findKeyVeh}(\tau_{cloud},\mathcal{T})$筛选得到关键周车$v_{key}$；
+
+    \noindent 其中，预测模型为满足以下条件的任意一种模型：
+    要求1、可以基于历史数据预测指定的任意多辆车的轨迹；
+    要求2、预测轨迹应为多模态轨迹，即时空中共享始端，但后续存在有限长度互不重叠的部分的轨迹。
+    要求3、所预测的多模态轨迹包含每条轨迹的概率。
+    本研究中车端多模态轨迹预测部分并非重点，为了简化问题采用如\ref{subsection:param_and_int_recog}节所述的基于改进MOBIL模型的换道概率预测方法，该方法原始版本及有效性请参见韩硕\cite{hans2024}的工作。
+
+      \begin{figure}
+        \centering
+        \subcaptionbox{关键周车确定 \label{fig:scenario_selection1}}
+          {\includegraphics[width=0.27\linewidth]{fig/chap3/scenario_selection1.png}}
+        \subcaptionbox{关键场景构建方法 \label{fig:scenario_selection2}}
+          {\includegraphics[width=0.71\linewidth]{fig/chap3/scenario_selection2.png}}
+        \caption{关键场景构建与筛选方法}
+        \label{fig:scenario_selection}
+      \end{figure}
+
+    关键周车查找方法$\text{findKeyVeh}(\tau_{cloud},\mathcal{T})$包含以下步骤：
+    假设所有车辆可以严格跟踪轨迹，将所有指定轨迹基于车辆运动学进行时空体积膨胀，得到每条指定轨迹的时空占用区域$\sigma_{traj\_name}$，下标$traj\_name$应替换为特定轨迹的名称，表示所述指定轨迹包括所述的预测性轨迹规划结果$\tau_{cloud}$、预设范围内每辆周车的多模态预测轨迹$\tau_i = \{\tau_i^1,\tau_i^2,\dots,\tau_i^{m_i}\}, i=1,2,\dots,N_{veh}$；
+    将每辆周车的每条多模态预测轨迹的时空占用区域$\sigma_{\tau_i^j}, i \in 1,2,\dots,N_{veh}, j \in 1,2,\dots,m_i$与云端推荐轨迹的时空占用区域$\sigma_{\tau_{cloud}}$求交集，若交集非空，则将交集沿云端推荐轨迹$\tau_{cloud}$的法线方向进行投影，得到交集在$\tau_{cloud}$上的投影沿$\tau_{cloud}$长度方向的距离，找出最小距离$d_{\tau_i^j}$作为轨迹$\tau_i^j$的相交距离；若$\sigma_{\tau_i^j}$与$\sigma_{\tau_{cloud}}$交集为空，则$d_{\tau_i^j} = +\infty$；
+    如图~\ref{fig:scenario_selection}所示，假设已经获得了对周车不同可能决策的轨迹预测及其对应的概率，同时假设已经获得了云端推荐的时空轨迹。
+    提出基于云端推荐轨迹的关键车辆定位机制，可能决策中与自车云端推荐轨迹最早相交的车辆，图中就是这里黑色车辆。
+
+    在所有$d_{\tau_i^j}, i \in 1,2,\dots,N_{veh}, j \in 1,2,\dots,m_i$找到最小的那一个，假设为$d_{\tau_p^j}$，并对应的第$p$辆车辆选取为关键车辆$v_{key}$，记录关键车辆$v_{key}$的第$j$条预测轨迹为危险轨迹。
+    
+    根据筛选出的关键周车和周车的多模态预测按照如下方法$\text{genScene}(\mathcal{T},v_{key})$得到场景$\alpha$和场景$\beta$，包含以下步骤：
+
+    将所有预设范围内的$N_{veh}$辆周车的所有多模态意图排列组合，每种组合都能生成一个场景，共生成$N_{scene} = \prod_{i=1}^{N_{veh}} m_i$个场景，并计算每个场景发生的可能性（假设当前为第$k$个场景，一共包含$N_{veh}$辆车，每辆车的意图对应的概率$p_i, i \in 1,2,\dots,N_{veh}$）$p_k = \prod_{i=1}^{N_{veh}} p_i$。其中场景定义为所包含的所有车辆的意图（即预测轨迹）是唯一确定的。
+
+    \begin{figure}
+      \centering
+      \includegraphics[width=0.9\linewidth]{fig/chap3/illust_scenario.png}
+      \caption{双场景规划示例说明}
+      \label{fig:scenario_illust}
+    \end{figure}
+
+    将所有$N_{scene}$个场景按照发生概率从高到低进行降序排序，并选取第1个场景作为场景$\alpha$，选取满足如下要求的场景作为场景$\beta$：
+    要求1、场景概率大于设定最小概率阈值$p_{min}$；
+    要求2、关键周车$v_{key}$的预测轨迹为所述步骤中所述危险轨迹的场景；
+    要求3、如要求1与要求2中所述的所有场景中概率最大的场景；
+    如图~\ref{fig:scenario_illust}所示，接着根据周车意图排列组合生成场景。最可能场景下所有周车均采用最可能决策，因此场景概率最大；最危险场景则是在包含关键车危险决策的候选场景中，概率大于给定阈值且概率最高的场景。本文不考虑发生概率小于\SI{2}{\percent}（$p_{min}=\SI{2}{\percent}$）的低概率场景。
+    
+    \subsection{双场景应急避障规划}
+    
+    采用Contingency Plan的思路，最可能场景为$S_{\alpha}$，最危险场景为$S_{\beta}$，规划一条分叉轨迹，有一个共享段，保证场景$S_{\beta}$安全的前提下优化场景$S_{\alpha}$的性能。
+
+    如图~\ref{fig:scenario_illust}所示的简易示例场景中，自车左后方的黄色快车为关键车辆，其最可能的预测结果为向左换道超车，但不排除小概率的跟车可能。云端推荐的轨迹是向左换道超过绿色车辆并在未来换回，但在黄车小概率的跟车情况下不可行，与云端推荐轨迹最早相交。故最可能场景$S_{\alpha}$为黄车向左换道，最危险场景$S_{\beta}$为黄车减速跟车。
+
+    基于云端初解的防侧翻双场景应急避障规划流程见算法~\ref{alg:contingency_dual_scenario_cilqr}。
+
+    \renewcommand{\algorithmicrequire}{\textbf{输入：}\unskip}
+    \renewcommand{\algorithmicensure}{\textbf{输出：}\unskip}
+
+    \begin{algorithm}
+      \caption{ContingencyCILQR 基于云端初解的防侧翻双场景应急避障规划}
+      \label{alg:contingency_dual_scenario_cilqr}
+      \small
+      \begin{algorithmic}
+        \REQUIRE $\mathcal{T},\tau_{cloud}, N_{iter,max}^{out}, N_{iter,max}^{in}, \epsilon_{tol}$
+        \ENSURE $\tau_{\alpha}, \tau_{\beta}$ 场景$S_{\alpha}$和$S_{\beta}$的最优轨迹
+
+        \STATE $v_{key} = \text{findKeyVeh}(\tau_{cloud},\mathcal{T})$ 查找关键周车
+        \STATE $[S_{\alpha},S_{\beta}] = \text{genScene}(\mathcal{T},v_{key})$
+        \STATE $\tau_{\alpha}^0 \leftarrow \tau_{\beta}^0 \leftarrow \tau_{\alpha} \leftarrow \tau_{\beta} \leftarrow\tau_{cloud}$ 初始化规划轨迹
+        \STATE $c_{cr} \leftarrow 0$ 初始化危机因子
+        \STATE $N_{iter}^{out} \leftarrow 0,~$
+        \STATE $c_{cons}^{\alpha} = \text{genConstraint}(S_{\alpha})$ 计算场景$S_{\alpha}$的约束
+        \STATE $c_{cons}^{\beta} = \text{genConstraint}(S_{\beta})$ 计算场景$S_{\beta}$的约束
+        \WHILE{$N_{iter}^{out} \leq N_{iter,max}^{out} \text{and not} ~\text{checkConverge}(\tau_{\alpha},\tau_{\beta},\epsilon_{tol})$}
+          \FOR{$i \in 1,2,\dots,N_{iter,max}^{in}$}
+            
+            \STATE $f_{\text{CBF}}^{\beta} = \text{genControlBarrier}(c_{cons}^{\beta}, N_{iter}^{out})$ 更新场景$S_{\beta}$的控制屏障函数
+            \STATE $\tau_{\beta} = \text{CILQR}(\tau_{\beta}^0,f_{\text{CBF}}^{\beta})$ 求解场景$S_{\beta}$的最优轨迹
+            \STATE $f_{\text{CBF}}^{\alpha} = \text{genControlBarrier}(c_{cons}^{\alpha}, N_{iter}^{out})$ 更新场景$S_{\alpha}$的控制屏障函数
+            \STATE $\tau_{\alpha} = \text{CILQR}(\tau_{\alpha}^0,f_{\text{CBF}}^{\alpha})$ 求解场景$S_{\alpha}$的最优轨迹
+          \ENDFOR
+          \STATE $c_{cr} = \text{adjustCrisis}(\tau_\beta,c_{cons}^{\beta})$
+          \STATE $\tau_{\alpha}^0 \leftarrow \tau_{\alpha}, ~\tau_{\beta}^0 \leftarrow \tau_{\beta}$ 更新初解
+          \STATE $N_{iter}^{out} \leftarrow N_{iter}^{out} + 1$ 
+        \ENDWHILE
+      \end{algorithmic}
+    \end{algorithm}
+
+
+    进行Contingency轨迹规划时，绿色表示共享段，红色表示场景$S_{\beta}$的应急轨迹，蓝色表示场景$S_{\alpha}$的最优轨迹。具体求解过程如算法~\ref{alg:contingency_dual_scenario_cilqr}所示。该求解过程分为两层迭代：外层约束松弛迭代不断收紧由初始约束生成的CBF，使问题由近似无约束iLQR逐渐趋近于完全约束问题；内层迭代在当前松弛约束下更新两类场景的轨迹。通过该方式，可在保证约束满足和初解包容的同时，避免原始CILQR方法对初解完全可行的要求。
+
+    通过设置危险因子$c_{cr}$，外层循环可根据场景$S_{\beta}$的约束违反情况逐渐增加其权重，以保证场景$S_{\beta}$的可行性；若约束违反较小，则逐渐减小$c_{cr}$，从而恢复$\tau_{\alpha}$的自由度。在防侧翻约束上，本文进一步添加式\eqref{eq:ltr_cbf}所示的LTR约束随时域收紧CBF，以抑制未来不确定性。整体思想是在任意时刻保证危险场景下轨迹可行，当识别到危险情况真实发生时，即可切换到可行的避险轨迹。
+    
+    本方法通过运动-动力学耦合模型建模牵挂轨迹与LTR动态，通过基于云控给推荐轨迹的场景选择简化考虑的场景，约束松弛和初解包容降低了对初解的可行性要求，危机因子与自适应机制使得能够在保证危险情况可行前提下尽量提升最可能情况下的性能，屏障函数风险保证进一步抑制了不确定性。
+
+
+\section{仿真实验设计与验证}
+\label{sec:vehicle_cloud_decision_planning_sim}
+  \subsection{云端规划仿真结果与分析}
+  \label{sub:cloud_decision_sim}
+    \subsubsection*{(1)仿真场景设计}
+      由历年液罐车事故发生统计情况进行战略场景分析可知，如第\ref{chap:architecture}章\ref{sub:ct2rop_arch_detail}节所述，江苏为液罐车事故最高发省份之一且常年位居事故榜首，且高速公路与一级公路为液罐车事故最高发道路类型，结合危险运输通常发生在加油站的运输的起终点信息，选择G15沈海高速江苏段作为基础场景，以连云港市中国石油连云港锦屏加油站作为起点，盐城市中国石油加油站为终点，全程约\SI{180}{km}，分布有15个含上下匝道口的高速立交，如图~\ref{fig:sim_place}所示。
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/sim_place.png}
+        \caption{连云港到盐城G15沈海高速仿真场景与交通流设置}
+        \label{fig:sim_place}
+      \end{figure}
+      每个高速立交通常跨度在数百米至\SI{1}{km}，在同行方向单侧包含一个汇入和一个汇出匝道，匝道限速\SI{40}{km/h}。
+
+      仿真用交通流包含车辆类型（Vehicle Type, vType）14类（车辆类型不单单包括车辆种类，还包括对应的驾驶员类型），其中包含4种车辆类别（Vehicle Class, vClass），分别是私家车（private）类别中的跑车\SI{7}{\percent}、SUV\SI{17.5}{\percent}、MPV\SI{10.5}{\percent}、普通轿车\SI{21}{\percent}、经济型轿车\SI{10.5}{\percent}，公交车（bus）类别的旅游客车\SI{3.5}{\percent}，卡车类别（truck）中的轻卡\SI{8}{\percent}、中卡\SI{7}{\percent}、重卡\SI{4}{\percent}、施工车辆\SI{1}{\percent}，以及半挂车类别（trailer）的标准挂\SI{5}{\percent}、加长挂\SI{3}{\percent}、超长挂\SI{1}{\percent}和半挂式液罐车\SI{1}{\percent}\cite{rioh_2023_traffic_volume,mot_2024_traffic}。每一类车辆的驾驶员模型和换道模型参数均设置为一定范围内的裁剪正态分布（Trimmed Normal Distribution）以保证交通流足够的异质性。
+
+      任务设计上，分为4类：Pass（通过高速立交并保持主路行驶）、Merge（通过匝道汇入高速主路）、Exit（从高速主路汇出至指定匝道）、Cruise（在无道路拓扑结构变化的主路上行驶），上述任务涵盖进入高速后最可能的所有主要任务，也囊括了液罐车高速事故的主要场景。对共计15个路口分别设置上述任务，并将交通流量按梯度依次排开设置为以\SI{500}{veh/h}为间隔的从\SIrange{1000}{4500}{veh/h}的8组，以路口No.8至No.15共8个路口的32个场景为训练集采集场景，以No.1至No.7的28个场景为验证场景，每个场景中先运行一段时间在路网积累足够多车辆后，自车在$t_{depr}$时刻发车并开始记录历史数据，在$t_{start}$时刻开始云端介入决策，正式开始仿真，每个场景都有一个任务结束的地点，行驶至阈值许可范围内即认为结束任务。详细不同意图的交通流量设置、终止地点等信息见补充表格\cite{KomasaQi2026MasterThesis_repo}。
+
+    \subsubsection*{(2)交互模型与决策模型训练}
+      Graphflow交互式预测模型的训练损失情况如图~\ref{fig:train_graphflow}所示。训练过程中曲线的浅色背景记录了对$T=\SI{20}{s}$预测时域内第1步到第20步预测结果对应特征的均方差（Mean Squared Error, MSE）。相比不采用调度采样课程学习机制的情况，采用该机制后初始损失会快速降低至可接受的低值，并在逐步提高自回归预测样本在历史输入中的比例时，先经历上升的适应过程，再缓慢下降并保持基本稳定。由于存在自车动作输入先验，自车占据特征$c_{ego}$的MSE损失整体稳定在\SI{1}{\percent}的极低水平附近；风险场特征$c_{risk}$相对连续，对车辆绝对位置预测精度的敏感性相对较低，其MSE损失整体稳定在\SIrange{2}{3}{\percent}附近；而周车占据特征$c_{occ}$需在车辆边缘精准截断，预测难度较高，整体稳定在\SI{3}{\percent}附近。由于各种不确定性的存在，预测\SI{20}{s}的超长时域问题本质上很难精确实现，因此预测时域内误差随扩散进程不断增大符合预期；在相对靠后的预测中，只需要Graphflow提供危险扩散的趋势即可帮助决策模型更好地识别风险。周车预测并不是越精准一定能产生更好的效果\cite{pred_neq_drive_tran2023what}，关键在于其是否能指导自车做出有效交互。
+
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/train_loss_graphflow.png}
+        \caption{Graphflow交互式预测模型训练损失}
+        \label{fig:train_graphflow}
+      \end{figure}
+
+      Graphflow模型的预测效果展示如图~\ref{fig:risk_pred}所示，其中图~\ref{fig:risk_pred1}展示了直道为主的场景图扩散预测，图~\ref{fig:risk_pred2}展示了包含高速立交的场景图扩散预测。二者共同显示出不同类型车辆的扩散特点。左侧车道快速行驶的车辆倾向于不断超车以维持高速，行驶速度变化范围较大，且在与周车交互过程中不确定性进一步累积，故不确定性相对较强，其在预测时域内倾向于扩散为大范围的低概率表征，呈弥散型扩散状态；对于在排队的车辆和正常速度行驶的车辆，由于其运动被严格限制或处于相对稳定状态，故其即使在\SI{20}{s}的超长预测时域内，仍然基本保持完整轮廓，呈确定型扩散状态。
+
+      \begin{figure}
+        \centering
+        \subcaptionbox{直道为主的场景图扩散预测 \label{fig:risk_pred1}}
+          {\includegraphics[width=0.8\linewidth]{fig/chap3/risk_pred1.png}}
+        \subcaptionbox{包含高速立交的场景图扩散预测 \label{fig:risk_pred2}}
+          {\includegraphics[width=0.8\linewidth]{fig/chap3/risk_pred2.png}}
+        \caption{Graphflow模型预测结果定性展示}
+        \label{fig:risk_pred}
+      \end{figure}
+
+      云端预测性决策模型训练情况如图~\ref{fig:train_ppo}所示，PPO算法使智能体平均回报在25000个回合内迅速上升至较高水平，并在此过程中缓慢振荡并有所提高。测试平均回报一开始基本接近于无模型，存在局部最高点，随探索加剧而不断下降，但在训练过程中仍然能发现比原始策略更优的策略。测试平均回报最高的模型被保存作为最终训练模型。策略梯度损失在训练过程中随探索到的状态增加而迅速上升，而后随着critic的收敛而逐渐下降到较低水平。训练过程中采用了余弦退火的训练策略以帮助稳定训练结果，否则训练后期易发生效果的剧烈振荡。
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/train_ppo.png}
+        \caption{云端预测性决策模型PPO训练指标}
+        \label{fig:train_ppo}
+      \end{figure}
+
+      上述预测模型与决策模型训练全部在单个RTX 5070 Laptop GPU上进行，各耗时\SI{6.9}{h}与\SI{8.3}{h}。
+
+    \subsubsection*{(3)仿真结果与分析}
+      在仿真结果评价指标上，采用可单车级计算的指标，分为安全、高效、舒适/经济、规则、导航5个维度进行评价。
+
+      \noindent 其中，安全指标包含4项：经典一维替代安全指标（Surrogate Safety Index, SSI）TTC的倒数、二维SSI 2D-TTC（本文用1/RTTC表示）的倒数、面向半挂车的修正紧急因子（trailer-oriented modified emergency index, Trailer-MEI），以及裁剪的车头距离（Head Way, HW）的倒数。Trailer-MEI为本文提出的二维替代安全指标，其通过改进MEI指标，分别计算安全预测时域内\emph{所有关键时刻}下可能包含挂车的两车牵引车与挂车\emph{两两排列组合MEI指标}并取最大值，使包含半挂车的二维风险计算成为可能\cite{KomasaQi2026MasterThesis_repo}。1/TTC能更好反映跟车/被跟车时的安全情况，1/RTTC能反映传统计算方式下考虑二维轮廓的SSI，Trailer-MEI使SSI计算更接近现实。加入1/HW的目的则是反映车辆并列行驶风险；液罐车属于高危车辆，与他车长时间并列行驶属于潜在危险行为，需加速或主动减速拉开车距。
+      
+      高效指标包含通行效率指标，计算逻辑与式\eqref{eq:effi_reward}基本相同，但从图平均计算转换为对明确的单车进行计算。舒适/经济指标为加速度二范数指标，计算方法与式\eqref{eq:conf_reward}完全相同。规则指标包含靠右行驶奖励与超速惩罚，计算方法与式\eqref{eq:conf_reward}完全相同；导航指标也与式\eqref{eq:nav_reward}逻辑相同。
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.87\linewidth]{fig/chap3/total_score.png}
+        \caption{交通流验证集仿真总得分情况对比}
+        \label{fig:total_score}
+      \end{figure}
+      \begin{figure}
+        \centering
+        \includegraphics[width=0.87\linewidth]{fig/chap3/r_safe.png}
+        \caption{总体安全指标得分对比图}
+        \label{fig:r_safe}
+      \end{figure}
+      本节在验证集上采用的对比方法为单车IDM+MOBIL与考虑预测性行为的决策树搜索（Decision Tree Search）。单车方法为SUMO默认内置的IDM与MOBIL换道模型，而基于该模型的单车规划方法虽逊于目前最新的端到端自动驾驶决策方法，但仍然是2023年为止最好的方案\cite{PLUTO2024}，可视为单车方案下的强基线；对未来预测时域$T=\SI{20}{s}$内的行为横纵向分别进行离散与搜索，并选择最好的行为进行执行，离散时间为\SI{1}{s}。对每种行为分支进行交互式推演，推演方法采用IDM与MOBIL模型进行，两者参数直接从SUMO获取真值，这意味着在对未来预测时域$T=\SI{20}{s}$进行离散程度为\SI{1}{s}的优化下，该方法应为最优。虽然实际由于计算指标只考虑未来\SI{20}{s}内最优，并非该离散水平下的全局最优，但其仍可以视为引入预测性信息进行决策的规则方法最强基线之一（该方法效果的发挥主要体现在预测模型是否准确，而直接采用真值进行预测使得其近乎\SI{20}{s}内最优解。在实际应用中由于无法获得如此精准的预测，故该对比方法无法用于实际，只能作为仿真中的强基线存在）。
+
+      任意选取10个随机种子进行28个场景共280次仿真的统计总得分情况如图~\ref{fig:total_score}所示，在4类任务和7种不同交通流量的统计维度下，Graphflow方法都接近理论最优的TreeSearch方法，且二者均超过单车方案。
+
+
+
+
+ 
+
+      每个子项的得分分别按任务类型和交通流量统计，详细统计结果见补充材料\cite{KomasaQi2026MasterThesis_repo}。其中，安全总计得分如图~\ref{fig:r_safe}所示，安全指标的子项如图~\ref{fig:safe_index}所示，其他指标如图~\ref{fig:other_metrices}所示。在所有安全得分上，预测性方法几乎都优于单车方法，尤其在Trailer-MEI这一指标上尤其显著。同时在1/HW指标上预测性方法更好，体现了其通过各种方式避免车辆并列情况带来的风险。
+
+      % TODO: 字体字号要保证，图要素齐全横纵坐标图例单位等
+      \begin{figure}
+        \centering
+        \subcaptionbox{1/TTC指标得分对比图 \label{fig:r_ttc_inv}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_ttc_inv.png}}
+        \subcaptionbox{1/RTTC指标得分对比图 \label{fig:r_rttc_inv}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_rttc_inv.png}}
+        \subcaptionbox{面向半挂车的修正紧急因子指标得分对比图 \label{fig:r_mei}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_mei.png}}
+        \subcaptionbox{车头时距1/HW指标得分对比图 \label{fig:r_hw_inv}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_hw_inv.png}}
+        \caption{交通流验证集仿真安全指标情况对比}
+        \label{fig:safe_index}
+      \end{figure}
+
+      在其他指标上，车辆通行效率如图~\ref{fig:r_effi}所示。由于液罐车属于危化品运输车辆，其高速路限速为\SI{80}{km/h}，相对于其他车辆较慢，故基本不存在大幅领先的情况，相关指标与非预测性方法基本维持一致。这说明预测性方法在不降低运输效率的前提下提升了安全性。需注意的是，不同场景得分总量取决于场景运行时间，巡航场景路程最长、耗时最长，故累计奖励最多，并不代表该场景相对其他场景在细分指标上更优。其他指标上预测性方法与非预测性方法基本维持一致。
+      % TODO: ①确保研究内容完整性是最重要的 ②写作方面逻辑性要加强，对核心要点的阐述，阐述不要扩散
+
+      \begin{figure}
+        \centering
+        \subcaptionbox{通行效率指标得分对比图 \label{fig:r_effi}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_effi.png}}
+        \subcaptionbox{导航服从率指标得分对比图 \label{fig:r_navi}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_navi.png}}
+        \subcaptionbox{靠右行规则指标得分对比图 \label{fig:r_right}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_right.png}}
+        \subcaptionbox{加速舒适性/经济性指标得分对比图 \label{fig:r_acc}}
+          {\includegraphics[width=0.87\linewidth]{fig/chap3/r_acc.png}}
+
+        \caption{交通流验证集仿真其他指标情况对比}
+        \label{fig:other_metrices}
+      \end{figure}
+
+      由上述分析可知，预测性方法通过引入长时域感知信息避免了车辆陷入潜在的危险情况，可以在不影响车辆效率、合规性、舒适性/经济性的前提下提升车辆安全性。同时，Graphflow方法作为离线训练在线应用的方法，在不依赖周车模型参数真值的情况下可实现与强基线基本一致甚至在某些工况下更好的效果，证明了本方法的有效性。
+
+
+
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/example_illust.png}
+        \caption{仿真情况案例对比图}
+        \label{fig:example_illust}
+      \end{figure}
+ 
+      为更直观地展示仿真结果，选取第8个高速交叉口巡航工况的一组仿真案例，如图~\ref{fig:example_illust}所示。单车方法找到局部最优解后在仿真时域内连续两次换道到最右侧，但一直严重受阻，总体得分在安全和其他指标上都不如预测性方法。而TreeSearch方法在本案例中一直行驶在最左侧车道，一方面最终没有让出快车道，另一方面没有让后方更快的车辆及时通行，导致长时间保持较小车间距，安全指标较差；Graphflow方法在快速完成超车后向右变道来到中间车道巡航，比右侧慢车快的同时让出了左侧超车道，行驶速度更快的小车迅速超过自车，减少了并排行驶时间，行车更为安全。同时，对比相同时间下行驶的距离可知，Graphflow方法与TreeSearch方法基本相同，且超过IDM+MOBIL方案。
+
+  \subsection{车端规划仿真工况介绍与结果分析}
+    本节根据现实中液罐车发生的各类事故重现场景，构造了4个典型场景来验证车端规划器的有效性。
+    \subsubsection*{(1)场景1：超车时与后方存在快车}
+      本场景中自车以\SI{72}{km/h}的初速度正在加速欲超过行驶在前方存在一辆\SI{60}{km/h}行驶的异常慢行卡车，左侧快车道存在\SI{120}{km/h}行驶的两辆快车，云端推荐的轨迹是想做换道超车再换回。最可能场景是后方快车见自车换道减速让行，定位关键周车为后方快车，最危险场景为后方快车保持车速通过无视自车换道意图。自车规划时域为$T_{veh}=\SI{8}{s}$，其中共享段时域为$T_{share} = \SI{0.5}{s}$，仿真结果如图~\ref{fig:scenario1}所示。规划结果本场景风险系数相对较低，由于可保证最危险情况下自车停止换道，故共享段规划结果仍保持加速尝试与后车进行交互。
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/scenario1.png}
+        \caption{场景1仿真案例说明}
+        \label{fig:scenario1}
+      \end{figure}
+      
+      由于规划不断进行，在后续交互中如后车减速，则规划结果将继续执行原方案向左换道超车；如后车维持车速甚至提速，则最可能场景将变更为后车维持原速或加速，则最危险场景与最可能场景合并，新的规划结果将执行停止换道方案。
+
+    \subsubsection*{(2)场景2：左转时对向直行慢车}
+      本场景中自车以\SI{40}{km/h}的初速度欲左转通过十字路口。此时对向直行车道远处存在一辆\SI{36}{km/h}行驶的慢车，云端推荐的轨迹是略减速防止侧翻后正常通过十字路口。最可能场景是对向直行慢车维持原速在自车通过后正常通过，但是多模态预测不排除这辆车突然加速冲过路口的可能，故定位关键周车为这辆直行慢车，最危险场景为其加速欲抢先通过路口。仿真结果如图~\ref{fig:scenario2}所示。规划结果本场景风险系数相对较高，最危险场景下由于车辆距离侧翻边界较近，故面对更多突发状况的稳定裕度不足，规划器选择在共享段执行减速指令。在最危险场景下规划器选择减速并向右侧让行，等待加速的慢车通过后再重新加速通过路口。
+
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/scenario2.png}
+        \caption{场景2仿真案例说明}
+        \label{fig:scenario2}
+      \end{figure}
+      
+
+    \subsubsection*{(3)场景3：后方驶来快车旁有并行车}
+      本场景刻画了高速上经常遇到的危险场景刀片超车。由于自车为半挂式液罐车，此时正在最右侧车道以其最高限速\SI{80}{km/h}的速度巡航，左后方有一辆几乎并行的小轿车以极慢的速度缓慢超过。此时后方有一辆超速约\SI{20}{\percent}的车辆以\SI{140}{km/h}的速度快速逼近且没有减速迹象。但由于后方异常快车较远，且自车与左后车间距较小且还在不断缩小，最可能的场景是快车被逼减速跟驰，直到左侧车辆超过自车后才得以超车。但未减速的后方异常快车极有可能维持原速或继续加速尝试刀片超车，与自车存在碰撞风险，其作为关键周车构成了最危险的场景。云端推荐轨迹为维持原速直行继续巡航。规划结果如图~\ref{fig:scenario3}所示，共享段为加速度并维持方向暂时不变观望后车行为，危险系数较大。
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/scenario3.png}
+        \caption{场景3仿真案例说明}
+        \label{fig:scenario3}
+      \end{figure}
+
+      由于半挂车减速较慢且左后方车辆与自车尚有一段距离，故如果自车通过减速方式将左侧小车让过已时间不足，且贸然减速会进一步缩小与后方异常快车的距离很可能引起追尾事故。故针对最危险场景的规划结果收敛到了持续加速至\SI{110}{\percent}限速以内（给规划器的速度上限）并向右侧应急车道略微让道约\SI{1.5}{m}左右的方案。通过加速的方式与右让的方式拓展了与左侧并行车辆的空间，为后方异常快车超车提供了更多安全空间。
+
+      
+
+    \subsubsection*{(4)场景4：空车道直行旁侧慢行队列}
+      本场景描述了面对旁侧车道被异常慢车积压，但本车道仍然处于空闲状态时的情况。自车正按限速\SI{80}{km/h}巡航，正欲通过匝道口继续保持主路行驶。在左侧车道积压了3辆车，其中最前方一辆车因错过高速路口而已经无法回头，减至极低速度后正在重新加速，后方为因其突然减速行为积压的2辆直行快车，此时左侧三辆车正从约\SI{18}{km/h}的初速度开始缓慢加速。最可能的情况是自车正常通过三辆正在加速的周车，但左侧积压车辆越往后换道意图逐渐增加，虽仍大概率沿本车道行驶但不排除换道的可能性，则最先与自车推荐轨迹相交且换道可能性最大的左侧第三车为关键周车，构成其突然向右换道的最危险场景。规划结果如图~\ref{fig:scenario4}所示，在最危险场景下自车循迹减速至旁侧车辆速度后跟随换道车辆缓慢加速通过，从而避免了碰撞。
+      \begin{figure}
+        \centering
+        \includegraphics[width=1.0\linewidth]{fig/chap3/scenario4.png}
+        \caption{场景4仿真案例说明}
+        \label{fig:scenario4}
+      \end{figure}
+      本场景同样危险系数较高，为在通过时与左侧车辆尽量缩小相对速度以维持风险的可控，在共享段执行的规划结果为符合最危险场景的减速策略。
+
+\section{本章总结}
+
+本章围绕车云协同液罐车防侧翻的核心目标，构建了“云端低频长时域预测性决策 + 车端高频短时域应急规划”的两级闭环框架：云端利用路侧广域感知与并行算力，在通信时延与丢包等不确定条件下提前识别潜在风险并下发可执行的决策建议；车端在本车感知与执行约束下完成快速响应与轨迹生成，从而在策略层面降低陷入危险工况的概率，在执行层面保障突发场景下的稳定与安全。
+
+在云端部分，本章提出面向交通交互的自回归图扩散预测模型，对周车进行长时域非确定性预测，并基于所构建的朴素世界模型进一步训练强化学习决策器，实现对速度/换道等行为的预测性决策；同时给出用于换道输出的平滑轨迹生成方法，使云端建议具备更好的可跟踪性与侧翻风险可控性。该部分形成了从交通图特征表示、预测模型训练到决策网络设计与优化训练的完整技术链路。本章全部云端算法开源于GitHub仓库COMPASS-Predictive-Driving中\cite{KomasaQi2025COMPASS-Predictive-Driving_repo}。
+
+在车端部分，本章面向应急避障与防侧翻需求，建立考虑液体晃动影响的半挂液罐车简化动力学描述，并将防侧翻与避障等安全约束融入约束迭代LQR问题构造，形成可实时求解的高频轨迹规划方法。通过双场景仿真与关键周车筛选的实验设置，对云端规划与车端应急规划分别进行了验证与对比分析，结果表明所提出的车云协同策略能够在复杂交互与突发风险下兼顾安全性、可行性与响应速度。
+
+\begin{enumerate}[label=(\arabic*)]
+  \item 构建了车云协同两级闭环：云端长时域低频预测性决策，车端短时域高频应急规划，明确了分工与信息流。
+  \item 提出了图扩散交互式预测模型并将其用于世界模型建模，支撑强化学习长时域决策训练与策略网络设计。
+  \item 给出云端换道平滑路径生成方法，提升决策建议的可执行性，并兼顾液罐车侧翻风险控制需求。
+  \item 建立考虑液体晃动的车端规划模型，构造带安全约束的迭代LQR求解流程，实现应急避障与防侧翻轨迹生成。
+  \item 设计仿真实验与关键周车筛选机制，从云端决策效果与车端规划效果两方面验证方法有效性与鲁棒性。
+\end{enumerate}
