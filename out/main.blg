@@ -1,0 +1,95 @@
+This is BibTeX, Version 0.99d (TeX Live 2025)
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: main.aux
+The style file: IEEEtran.bst
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated wiz_functions (elt_size=4) to 6000 items from 3000.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Database file #1: main.bib
+Warning--I didn't find a database entry for "200Accidents"
+Warning--I didn't find a database entry for "WenlingAccidents"
+Warning--I didn't find a database entry for "ChinaRailway"
+Warning--I didn't find a database entry for "GB18564-1"
+Warning--I didn't find a database entry for "TSGR0005-2011"
+Warning--I didn't find a database entry for "JiaXinHong"
+Warning--I didn't find a database entry for "HuangYang"
+Warning--I didn't find a database entry for "Helieyun2020"
+Warning--I didn't find a database entry for "wangZhaoLin2002"
+Warning--I didn't find a database entry for "Matthew2022"
+Warning--I didn't find a database entry for "WangXiaorun2022"
+Warning--I didn't find a database entry for "WanYing2018"
+Warning--I didn't find a database entry for "Yuzhixin2018"
+Warning--I didn't find a database entry for "XuXiaomei2022"
+Warning--I didn't find a database entry for "MaoHaijian2021"
+Warning--I didn't find a database entry for "Lijie2020"
+Warning--I didn't find a database entry for "ChenYibao2016"
+Warning--I didn't find a database entry for "Quhuijun2017"
+Warning--I didn't find a database entry for "Yudi_Lixiansheng2016"
+Warning--I didn't find a database entry for "Yudi2019"
+Warning--I didn't find a database entry for "Gonzalo2022"
+Warning--I didn't find a database entry for "LiuKui_Kangning_brake"
+Warning--I didn't find a database entry for "LiuKui_Kangning_corner"
+Warning--I didn't find a database entry for "ActiveSus_Engery"
+Warning--I didn't find a database entry for "ZhaoWeiqiang2018"
+Warning--I didn't find a database entry for "ZhaoWeiqiang2019"
+Warning--I didn't find a database entry for "Yuzhixin2019"
+Warning--I didn't find a database entry for "CloudSysLeqiangLi"
+Warning--I didn't find a database entry for "KomasaMutiDOF"
+Warning--I didn't find a database entry for "ParamDisting1"
+Warning--I didn't find a database entry for "ParamDisting2"
+Warning--I didn't find a database entry for "EbenLi_FastMPC"
+Warning--I didn't find a database entry for "CT2ROPTheoriesRepo"
+Warning--I didn't find a database entry for "MPC_MotionPlanning2021"
+Warning--I didn't find a database entry for "ZMP_2017"
+Warning--I didn't find a database entry for "BookMPC"
+Warning--I didn't find a database entry for "Cutler1980DynamicMatrixControl"
+Warning--I didn't find a database entry for "soft_constraint_Eben2010"
+-- IEEEtran.bst version 1.14 (2015/08/26) by Michael Shell.
+-- http://www.michaelshell.org/tex/ieeetran/bibtex/
+-- See the "IEEEtran_bst_HOWTO.pdf" manual for usage information.
+
+Done.
+You've used 9 entries,
+            4087 wiz_defined-function locations,
+            961 strings with 10040 characters,
+and the built_in function-call counts, 5642 in all, are:
+= -- 477
+> -- 96
+< -- 42
++ -- 56
+- -- 16
+* -- 255
+:= -- 912
+add.period$ -- 18
+call.type$ -- 9
+change.case$ -- 8
+chr.to.int$ -- 87
+cite$ -- 9
+duplicate$ -- 417
+empty$ -- 455
+format.name$ -- 19
+if$ -- 1302
+int.to.chr$ -- 0
+int.to.str$ -- 9
+missing$ -- 69
+newline$ -- 50
+num.names$ -- 9
+pop$ -- 145
+preamble$ -- 1
+purify$ -- 0
+quote$ -- 2
+skip$ -- 453
+stack$ -- 0
+substring$ -- 226
+swap$ -- 334
+text.length$ -- 13
+text.prefix$ -- 0
+top$ -- 5
+type$ -- 9
+warning$ -- 0
+while$ -- 23
+width$ -- 10
+write$ -- 106
+(There were 38 warnings)
