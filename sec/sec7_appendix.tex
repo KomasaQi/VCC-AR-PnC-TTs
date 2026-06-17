@@ -1,153 +1,76 @@
+\appendices
 
+\section{Architecture Modeling Details}
 
-\section*{Appendix A: Semi-trailer tank truck model}
-\label{appendix:A}
-Parameters in model (\ref{eq:c_time_ss_model}) are given by
+The main text only uses the architecture analysis to define system boundaries and time scales. The original architecture study follows a scenario-oriented model and simulation based system-of-systems engineering process. It treats vehicle-cloud collaborative tank-truck rollover prevention as a low-penetration highway mission in an intelligent vehicle cyber-physical system. The full architecture contains strategic, operational, service, and resource views. These views are useful for tracing requirements, but they are not necessary for the main algorithmic derivation.
+
+The resulting design constraints used in this paper are as follows. First, the cloud side is an advisory and predictive layer rather than a direct actuator controller, and its main safety role is to reduce induced interaction risks before the ego vehicle enters a local emergency. Second, the vehicle side must maintain an independent safety loop because the cloud message may be delayed, lost, or invalidated by local perception. Third, the layered periods are approximately 1--2 Hz for cloud-side predictive planning, 10 Hz for vehicle-side emergency planning, and 20 Hz or higher for high-frequency anti-rollover control. Fourth, the emergency response chain must remain vehicle-side executable even when the cloud service is unavailable, so degraded safety does not rely on cloud availability.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{fig/chap2/arch_method_mapping_v3.png}
+  \caption{Traceability from architecture constraints to cloud-side planning, vehicle-side planning, and vehicle-side anti-rollover control.}
+  \label{fig:appendix_arch_trace}
+\end{figure}
+% TODO: Redraw this appendix figure in English if the architecture traceability result is retained in the submitted manuscript.
+
+\section{Graphflow Training and Decision Policy Details}
+
+The Graphflow dataset is constructed by extracting a fixed road-graph region around the ego vehicle. The source implementation uses a forward range of about 700 m and a backward range of about 300 m to cover long-horizon highway interactions. Historical and future dynamic node features are mapped to the same graph topology, so autoregressive prediction can be performed by updating node features while keeping the edge set fixed.
+
+The graph encoder uses three information sources: node features, edge features, and conditioning features. Node features describe static road semantics and dynamic traffic occupancy. Edge features describe road connectivity and lane-changing relations. Conditioning features include time encoding and ego action encoding. Local graph attention aggregates edge-aware neighbor information, while global attention captures long-range interaction over the graph. The output head predicts the dynamic-feature velocity field used in the flow-matching objective.
+
+The reinforcement-learning decision policy uses a shared feature extractor for actor and critic. It encodes the traffic graph, ego features, and surrounding-vehicle historical features, then outputs an action sequence consisting of desired acceleration and lane-change command. The reward terms used in training are summarized in Table~\ref{tab:appendix_reward}.
+
+\begin{table}[t]
+  \centering
+  \caption{Cloud-Side Policy Reward Terms}
+  \label{tab:appendix_reward}
+  \begin{tabularx}{\linewidth}{p{0.22\linewidth}X}
+    \toprule
+    Term & Role \\
+    \midrule
+    Safety & Penalizes ego occupancy on high graph-risk fields over the prediction horizon. \\
+    Efficiency & Rewards speed close to road speed limits. \\
+    Comfort & Penalizes acceleration magnitude and unnecessary lane changes. \\
+    Consistency & Penalizes discontinuity between successive planned action sequences. \\
+    Rule compliance & Penalizes speeding and unnecessary left-lane occupation. \\
+    Navigation & Rewards staying on route-consistent graph nodes. \\
+    \bottomrule
+  \end{tabularx}
+\end{table}
+
+\section{Liquid-Sloshing Model Details}
+
+The high-fidelity rapid sloshing model used in the thesis is the sliding telescopic libra model. It represents longitudinal-lateral coupled liquid motion through sliding lumped masses on smooth surfaces and curves. Compared with a two-dimensional pendulum model, this structure can describe liquid mass transfer between tank chambers, additional yaw moment induced by tank rotation, and longitudinal-lateral coupling under simultaneous acceleration, roll, and yaw excitation. The model was introduced to preserve the key six-degree-of-freedom sloshing modes needed by anti-rollover control while remaining much faster than CFD during repeated prediction.
+
+The STL model can be written as
 \begin{equation}
-A_{c} = 
-\begin{bmatrix}
-{T_{c}M^{- 1}A_{0}T_{c}^{-1}} & \textbf{0} \\
-A_{1} & A_{2}
-\end{bmatrix}
-X,B_{c} = 
-\begin{bmatrix}
-{T_{c}M^{- 1}B_{0}} \\ \textbf{0}
-\end{bmatrix}\nonumber
+  [X_{STL}(k+1),Q_{STL}(k+1)]
+  =f_{STL}(X_{STL}(k),u_l(k)|w_{STL}),
+  \label{eq:appendix_stl}
 \end{equation}
-\vspace{-0.3cm}
+where $X_{STL}$ is the liquid-equivalent state, $u_l=[a_x,a_y,\phi,\ddot{\phi},\dot{\psi},\ddot{\psi}]^T$ is the tank excitation input, $w_{STL}$ is the identified parameter vector, and $Q_{STL}$ contains the equivalent liquid forces and moments. Parameters are identified from CFD data by minimizing the force/moment error over orthogonal excitation cases.
+
+\begin{figure}[t]
+  \centering
+  \subfloat[STL model construction\label{fig:appendix_stl_model}]
+    {\includegraphics[width=0.95\linewidth]{fig/chap4/stl_model.png}}\\
+  \subfloat[Residual re-linearization\label{fig:appendix_residual_learning}]
+    {\includegraphics[width=0.95\linewidth]{fig/chap4/residual_learning.png}}
+  \caption{Liquid-sloshing modeling and residual re-linearization.}
+  \label{fig:appendix_liquid_model}
+\end{figure}
+
+For online MPC, the STL model is converted into a linearized double-pendulum model. A residual reinforcement-learning model maps the current STL state to parameter corrections and state estimates for the LDP model:
 \begin{equation}
-T_{c} = diag\left( \begin{bmatrix}
-v_{1x} & 1 & 1 & 1 & v_{2x} & 1 & 1 & 1 & 1 & 1
-\end{bmatrix} \right)\nonumber
+  [\Theta,\Delta w_{LDP}]=n_{\varphi}(X_{STL}),
+  \label{eq:appendix_residual}
 \end{equation}
+where $\Theta$ is the LDP state estimate and $\Delta w_{LDP}$ is the parameter correction. The training reward penalizes the multi-step force/moment mismatch between STL and LDP outputs over representative excitations.
 
-\vspace{-0.7cm}
+\section{Additional Validation and Platform Details}
 
-\begin{equation}
-\setlength{\arraycolsep}{1.2pt}
-A_1 = \begin{bmatrix}
-0 & 1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-\cos(\psi_1) & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
--\sin(\psi_1) & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\\nonumber
-\end{bmatrix}
-\setlength{\arraycolsep}{1.2pt}
-A_2 = \begin{bmatrix}
-0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 \\
-0 & \sin(\psi_1) & 0 & 0 \\
-0 & \cos(\psi_1) & 0 & 0 \\\nonumber
-\end{bmatrix}
-\end{equation}
-\vspace{-0.2cm}
-\begin{equation}
-\setlength{\arraycolsep}{1.2pt}
-M = \begin{bmatrix}
-m_{11} & I_{1ZZ} & 0 & m_{14} & 0 & 0 & 0 & 0 & 0 & 0 \\ 
-m_{21} & {- I_{1xz}} & 0 & m_{24} & 0 & 0 & 0 & 0 & 0 & 0 \\
-m_{31} & 0 & 0 & m_{34} & m_{35} & 0 & 0 & m_{38} & 0 & {m_{p}l_{p}} \\
-0 & 0 & 0 & 0 & {em_{35}} & {- I_{2zz}} & 0 & m_{48} & 0 & {em_{p}l_{p}} \\
-0 & 0 & 0 & 0 & m_{55} & {- I_{2xz}} & 0 & m_{58} & 0 & m_{510} \\
-1 & {- \frac{c}{v_{1x}}} & 0 & {- \frac{h_{1c}}{v_{1x}}} & {- 1} & {- \frac{e}{v_{2x}}} & 0 & \frac{h_{2c}}{v_{2x}} & 0 & 0 \\
-0 & 0 & 1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 1 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 1 & 0 \\
-0 & 0 & 0 & 0 & \frac{v_{2x}}{l_{p}} & 0 & 0 & \frac{h_{p}}{l_{p}} & 0 & 1
-\end{bmatrix}\nonumber
-\end{equation}
-\vspace{-0.3cm}
-\begin{equation}
-\begin{aligned}
-m_{11} &= m_1 v_{1x} c, m_{14} = -m_{1s} h_1 c - I_{1xz}, \\
-m_{21} &= (m_1 h_{1c} - m_{1s} h_1) v_{1x}, \\
-m_{24} &= I_{1xx} + 2m_{1s} h_1^2 - m_{1s} h_1 h_{1c}, \\
-m_{31} &= m_1 v_{1x}, m_{34} = -m_{1s} h_1, \\
-m_{35} &= (m_p + m_0) v_{2x} + m_2 v_{2x}, \\
-m_{38} &= -m_{2s} h_2 - (m_0 h_0 + m_p h_p), \\
-m_{48} &= I_{2xz} + em_{38}, \\
-m_{55} &= (m_2 h_{2c} - m_{2s} h_2) v_{2x} + h_{2c}(m_p + m_0) v_{2x} \\
-       & - (m_0 h_0 + m_p h_p) v_{2x}, \\
-m_{58} &= I_{2xx} + 2m_{2s} h_2^2 + h_2 c m_{38} + (m_0 h_0^2 + m_p h_p^2), \\
-m_{510} &= (h_{2c} - h_p) m_p l_p.\nonumber
-\end{aligned}\nonumber
-\end{equation}
-\vspace{-0.2cm}
-\begin{equation}
-\setlength{\arraycolsep}{1.2pt}
-A_{0} = \begin{bmatrix}
-a_{11} & a_{12} & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 \\
-a_{21} & a_{22} & a_{23} & {- c_{1}} & 0 & 0 & k_{12} & 0 & 0 & 0 \\
-a_{31} & a_{32} & 0 & 0 & k_{3} & a_{36} & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & a_{45} & a_{46} & 0 & 0 & 0 & 0 \\
-0 & 0 & k_{12} & 0 & a_{55} & a_{56} & a_{57} & {- c_{2}} & a_{59} & 0 \\
-0 & {- 1} & 0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0 & 1 & 0 & 0 \\
-0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 1 \\
-0 & 0 & 0 & 0 & 0 & {- \frac{v_{2x}}{l_{p}}} & 0 & 0 & {- \frac{g}{l_{p}}} & {- c_{d}}
-\end{bmatrix}\nonumber
-\end{equation}
-\vspace{-1cm}
+The vehicle-liquid co-simulation platform couples TruckSim, Simulink, and StarCCM+. TruckSim provides vehicle acceleration and angular motion to the CFD model. StarCCM+ returns liquid forces and moments to the vehicle model. The data exchange interval in the reported co-simulation is 0.005 s. The liquid phase is gasoline-like $C_8H_{17}$ with 50\% filling ratio. The selected mesh setting is obtained from grid sensitivity analysis with average relative error below 1\% and peak error below 4\%.
 
-
-\begin{align*}
-a_{11} &= (a+c) k_1 + (c-b) k_2, \\
-a_{12} &= \frac{a(a+c) k_1 - b(c-b) k_2}{v_{1x}} - m_1 v_{1x} c, \\
-a_{21} &= k_1 h_{1c} + k_2 h_{1c}, \\
-a_{22} &= \frac{(ak_1 - bk_2) h_{1c}}{v_{1x}} + (m_{1s} h_1 - m_1 h_{1c}) v_{1x}, \\
-a_{23} &= m_{1s} gh_1 - k_{r1} - k_{12}, a_{31} = k_1 + k_2, \\
-a_{32} &= \frac{ak_1 - bk_2}{v_{1x}} - m_1 v_{1x}, \\
-a_{36} &= -\frac{dk_3}{v_{2x}} - m_2 v_{2x} - (m_0 + m_p) v_{2x}, \\
-a_{45} &= (d+e) k_3, \\
-a_{46} &= -\frac{d(e+d) k_3}{v_{2x}} - m_2 v_{2x} e - e(m_0 + m_p) v_{2x}, \\
-a_{55} &= k_3 h_2 e, \\
-a_{56} &= -\frac{dk_3 h_{2c}}{v_{2x}} + (m_{2s} h_2 - m_2 h_{2c}) v_{2x} \\
-       &+ (m_0 h_0 + m_p h_p) v_{2x} - h_{2c}(m_0 + m_p) v_{2x}, \\
-a_{57} &= m_{2s} gh_2 - k_{r2} - k_{12}, a_{59} = -m_p l_p g.\nonumber
-\end{align*}
-
-
-\vspace{-0.7cm}
-
-
-\begin{equation}
-\setlength{\arraycolsep}{2pt}
-B_{0} = \begin{bmatrix}
-{- \left( {c + a} \right)k_{1}} & {- k_{1}h_{1c}} & {- k_{1}} & 0 & 0 & 0 & 0 & 0 & 0 & 0\nonumber
-\end{bmatrix}^{T}
-\end{equation}
-
-\vspace{-0.7cm}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+The scaled experimental platform is a 1:14 semi-trailer model with an acrylic tank and anti-surge plates. The controller is implemented in C++ under ROS on a Jetson Orin NX. State measurements include IMU/GNSS pose and angular motion, wheel-encoder speed, and estimated liquid states. The similarity design uses static-stability-factor correction for vehicle rollover dynamics and Froude-number consistency for free-surface liquid sloshing. Additional experiment videos, simulation settings, and code-level implementation details are referenced in the thesis repository \cite{KomasaQi2026MasterThesis_repo}.

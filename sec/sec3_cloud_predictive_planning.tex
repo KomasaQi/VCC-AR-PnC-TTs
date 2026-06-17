@@ -1,152 +1,189 @@
-\vspace{-0.2cm}
-\section{Anti-rollover Path Tracking Controller}
-\subsection{Mechanism of anti-rollover path tracking}
-By utilizing a multi-constraint model predictive control (MPC), the anti-rollover path tracking can explicitly consider input and output constraints. This ensures that, given a reasonably accurate model, as long as a feasible control solution exists, the vehicle will not experience rollover or violate other feasibility constraints. In cases where there is no feasible solution that satisfies all constraints, the solver, aided by relaxation factors, will first violate the least critical soft constraints until it finds a feasible solution with the lowest penalty.
+\section{Cloud-Side Predictive Planning}
 
-As shown in Fig. \ref{fig:mechanism}, assuming a global reference path has been obtained through cloud-based predictive lane change or other path planning applications, the path tracking controller solves a quadratic programming MPC problem to obtain a feasible control solution sequence that minimizes violations of soft constraints, and selects the first control input from this sequence as the actual control input.
+\subsection{Traffic Graph Representation}
 
-\begin{figure}[!htb]
-\centering
-\vspace{-0.5cm}
-\includegraphics[width=3in]{fig/machanism.png}
-\vspace{-0.1cm}
-\caption{Mechanism of anti-rollover path tracking based on multi-constrained MPC}
-\vspace{-0.5cm}
-\label{fig:mechanism}
+Cloud-side predictive planning must reason over a larger spatial range than vehicle-side local perception. In the highway scenarios considered here, a passenger car traveling at 120 km/h can cover about 667 m within 20 s. Therefore, the cloud uses a road-centered graph representation rather than a BEV raster. A large BEV image wastes computation on non-road regions, lets irrelevant background semantics dominate the representation at large spatial scales, and may confuse overlapping ramps or viaducts after projection onto a plane. A graph representation stores only reachable road elements, preserves topological connectivity, and scales with the number of road nodes rather than image area, as illustrated in Fig.~\ref{fig:graph_representation}.
+
+\begin{figure}[t]
+  \centering
+  \subfloat[BEV representation issue\label{fig:bev_problem_journal}]
+    {\includegraphics[width=0.44\linewidth]{fig/chap3/bev_problem.png}}
+  \subfloat[Directed road graph\label{fig:graph_solution_journal}]
+    {\includegraphics[width=0.44\linewidth]{fig/chap3/graph_solution.png}}
+  \caption{Motivation for traffic graph representation in cloud-side predictive planning.}
+  \label{fig:graph_representation}
 \end{figure}
 
-
-
-\subsection{Optimal control problem construction}
-The construction of the optimal control problem in this section includes output design, cost function construction, and constraint design.
-The designed outputs are as follows
-
-\vspace{-0.3cm}
+The road topology is discretized into directed road nodes. For lane-level highway modeling, each lane is discretized longitudinally and laterally, with topology-dependent connections for normal lane sections, merging/diverging sections, and junctions. The resulting graph is
 \begin{equation}
-y = \left[ \theta \,\dot{\theta} \,\psi_1\, Y_1 \,X_1 \,LTR_{eql} \right]^T
-\label{eq:yk}
+  \mathcal{G}=(\mathcal{V},\mathcal{E}),\quad
+  \mathcal{V}=F_{stat}\oplus F_{dyn},\quad
+  \mathcal{E}=F_{con},
+  \label{eq:traffic_graph}
 \end{equation}
-\vspace{-0.3cm}
+where $F_{stat}$ contains static road attributes and $F_{dyn}$ contains dynamic traffic attributes. The static node features include node position, lane position type, lane index, edge type, speed limit, and navigation-route indicator. The dynamic node features include surrounding-vehicle occupancy, vehicle type, speed, acceleration, heading, ego occupancy, estimated intention, and a risk-field value. The edge features encode connection type and normalized node distance. Fig.~\ref{fig:graph_features} shows an example.
 
-Output variables in this study can be divided into three parts:
-	 Vehicle attitude for path tracking: $Y_1$, $X_1$, $\psi_1$,
-	 linearized equivalent pendulum states for driving sloshing suppression: $\theta$, $\dot{\theta}$,
-	 and equivalent load transfer rate based on suspension forces for rollover prevention: $LTR_{eql}$. Even though lateral error is a widely used state variable for tracking \cite{Reviewer1_FuzzySteering}, which makes a linear tracker as shown in Figure.\ref{fig:tracker}, absolute position $Y_1$, $X_1$ are used as the state variables that make an absolute tracker \cite{ShengboEbenLi2024reinforcement} and allow for more accurate prediction of higher-order dynamics in tracking, crucial for managing sloshing and rollover states over a longer prediction horizon up to 1.5 $s$-3 $s$ (covering the sloshing period around 1 $s$\cite{wangZhaoLin2002} to catch potential peaks in $LTR$ dynamics). This approach enhances MPC's effectiveness, ensuring better stability and safety compared to linear trackers that simplify these dynamics.
-     
-  \vspace{-0.6cm}
-\begin{figure}[!hbt]
-
-  \subfloat[]{
-    \includegraphics[width=0.215\textwidth]{fig/linear_tracker.jpg}
-    \label{fig:linear_tracker}
-  }
-  \subfloat[]{
-    \includegraphics[width=0.21\textwidth]{fig/absolute_tracker.jpg}
-    \label{fig:abs_tracker}
-  }
-  \vspace{-0.1cm}
-  
-  \caption{Comparison of linear tracker and absolute tracker.(a)Linear tracker (or a tangent tracker when $l_{s} \rightarrow 0$) (b)Absolute tracker. }
-  \label{fig:tracker}
-  \vspace{-0.3cm}
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{fig/chap3/feature_example.png}
+  \caption{Road-node and edge feature representation for the traffic graph.}
+  \label{fig:graph_features}
 \end{figure}
 
-
-
-
-The MPC controller in this research corresponds to three functions: path tracking, sloshing suppression, and rollover prevention. For path tracking, only the tractor's state variables are used since the trailer trajectory closely follows the tractor trajectory, making it more convenient in terms of sensor placement and computational complexity. Additionally, forces generated by liquid sloshing depend on both the sloshing angle and angular velocity. Even small changes in the angle can lead to significant lateral forces and roll moments when the angular velocity changes dramatically. Hence, it is necessary to consider both the suppression of liquid sloshing angle and angular velocity. Commonly used indicators for vehicle rollover include static stability factor (SSF), dynamic stability factor (DSF), lateral load transfer rate (LTR), time to rollover (TTR) \cite{MPC_MotionPlanning2021}, zero moment point (ZMP) \cite{ZMP_2017}, and combinations thereof. SSF effectively represents the vehicle's static rollover resistance but lacks suitability for dynamic representation. LTR, TTR, and ZMP better reflect the vehicle's dynamic rollover state and are somewhat equivalent. In this study, LTR is selected as the rollover indicator, although its practical application in engineering is limited due to the difficulty of measuring tire-ground normal force. Consequently, the suspension force equivalent $LTR_{eql}$ is commonly used as a substitute.
-\vspace{-0.3cm}
+The risk field is used to provide a compact local safety prior on the graph. For node $i$ and its longitudinal neighbor $i+k$ in the same lane, the occupancy and speed risks are diffused along forward and backward graph directions:
 \begin{equation}
-LTR_{eql} = c_f \cdot \left( -k_{r1}\phi_1 - c_1 \dot{\phi}_1 - k_{r2}\phi_2 - c_2 \dot{\phi}_2 \right)
-\label{eq:LTR_eql}
+R_{occ}(i,k)=
+\begin{cases}
+c_{occ}(i)\lambda_f^k, & k>0,\\
+c_{occ}(i), & k=0,\\
+c_{occ}(i)\lambda_b^{-k}, & k<0,
+\end{cases}
+\label{eq:r_occ}
 \end{equation}
-\vspace{-0.3cm}
-where coefficient $c_f$ is 
-
 \begin{equation}
-c_f = \frac{2}{\frac{T_{w1} + T_{w2}}{2} (m_1 + m_2) g}.
+R_{spd}(i,k)=
+\begin{cases}
+c_v^+(i)\lambda_f^k, & k>0,\\
+c_v^+(i)+c_v^-(i), & k=0,\\
+c_v^-(i)\lambda_b^{-k}, & k<0,
+\end{cases}
+\label{eq:r_spd}
+\end{equation}
+where $\lambda_f$ and $\lambda_b$ are exponential decay factors, and $c_v^+$ and $c_v^-$ are normalized relative-speed risk components. The final risk field of target node $j$ is
+\begin{equation}
+  \begin{aligned}
+  c_{risk}(j)=\min\bigg(&
+  \sum_{i\in\Omega_b(j)} R_{occ}(i,j-i)\\
+  &+\lambda_{spd}R_{spd}(i,j-i),\,1\bigg),
+  \end{aligned}
+  \label{eq:risk_field}
+\end{equation}
+where $\Omega_b(j)$ is the set of same-lane source nodes that can contribute risk to node $j$.
+
+\subsection{Graphflow-Based Interactive Prediction}
+
+Graphflow is designed as an autoregressive graph-flow prediction model for long-horizon stochastic interaction. Given historical graph states, the ego action, and time encoding, it predicts the future evolution of dynamic node features over a horizon of 20 s. Unlike deterministic trajectory predictors, Graphflow models how occupancy and risk diffuse over the graph, which is more suitable for cloud-side risk anticipation than precise single-trajectory prediction at long horizons. This formulation also avoids explicitly enumerating all surrounding-vehicle intention combinations, whose strategy tree grows rapidly with the number of vehicles and the decision horizon.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.95\linewidth]{fig/chap3/graphflow_training.png}
+  \caption{Graphflow training and autoregressive graph diffusion.}
+  \label{fig:graphflow_training_journal}
+\end{figure}
+
+The model input at step $k$ is a spatiotemporal graph
+\begin{equation}
+  \mathcal{G}_{st}^{k}=
+  \left\{F_{stat},F_{dyn}^{k-T:k},\mathcal{E},a_e^k\right\},
+  \label{eq:graphflow_input}
+\end{equation}
+where $a_e^k$ is the ego action used to condition surrounding-vehicle evolution. The graph encoder contains local edge-aware graph attention for neighbor interaction and a global graph attention block for long-range dependency. Time and ego-action encodings are injected into node embeddings. The model outputs a velocity field of dynamic node features:
+\begin{equation}
+  v_t^{\boldsymbol{\theta}}(F_{dyn}^{t}|\mathcal{G}_{st}^{k}),
+  \quad t\in[k,k+1].
+  \label{eq:graphflow_velocity}
 \end{equation}
 
-Conditions for $LTR_{eql}\Longleftrightarrow LTR$ are
-	 accurate identification of suspension-related parameters ($k_{r1}$, $k_{r2}$, $c_1$, $c_2$), mass parameters ($m_1$, $m_2$), and track widths ($T_{w1}$, $T_{w2}$), and precise measurement or estimation of vehicle roll angle $\phi_i$ and roll angular velocity $\dot{\phi}_i$.
-
-Although achieving these conditions exactly is infeasible in practice, an equivalent value of LTR can still be obtained with high accuracy. $LTR_{eql}$ does not suffer from the ±1 saturation and can accurately reflect the vehicle's rollover dynamics even in extreme situations where one wheel is off the ground. Moreover, the parameters for $LTR_{eql}$ are easily obtainable and computationally efficient. To observe the aforementioned output variables, observation matrix $C_d$ should be defined as
-\vspace{-0.2cm}
+The flow-matching objective is used because the training data contain true graph evolution between adjacent time steps. A target velocity field $v_t^{target}$ is obtained by time interpolation and differentiation between $F_{dyn}^k$ and $F_{dyn}^{k+1}$. The conditional flow-matching loss is
 \begin{equation}
-C_{d} = \begin{bmatrix}
-\begin{matrix}
-0_{5 \times 8} & \mathbf{I}_{5}
-\end{matrix} \\
-c_{4}
-\end{bmatrix}
+  \mathcal{L}_{CFM}(\boldsymbol{\theta})=
+  \left\|
+  v_t^{\boldsymbol{\theta}}(F_{dyn}^{t}|\mathcal{G}_{st}^{k})
+  -v_t^{target}(F_{dyn}^{t}|F_{dyn}^{k+1})
+  \right\|_2^2.
+  \label{eq:cfm_loss}
 \end{equation}
-
-where $
-\setlength{\arraycolsep}{1.2pt}
-c_{4} = c_{f}\begin{bmatrix}
-0 & 0 & {- k_{r1}} & {- c_{1}} & 0 & 0 & {- k_{r2}} & {- c_{2}} & 0_{1 \times 6}
-\end{bmatrix}\nonumber
-$.
-
-The discrete-time model constructed is
-
+The predicted next graph is obtained with one-step numerical integration:
 \begin{equation}
-\left\{
+  F_{dyn}^{\boldsymbol{\theta},k+1}
+  =F_{dyn}^{k}
+  +\Delta t\,
+  v_t^{\boldsymbol{\theta}}(F_{dyn}^{t}|\mathcal{G}_{st}^{k}).
+  \label{eq:graphflow_euler}
+\end{equation}
+To reduce autoregressive drift, scheduled sampling curriculum learning is adopted \cite{DCRNN2018}. With mini-batch count $N_{batch}$, the teacher-forcing probability is
+\begin{equation}
+  \epsilon_{SSCL}=
+  \frac{\tau_{SSCL}}
+  {\tau_{SSCL}+\exp(N_{batch}/\tau_{SSCL})},
+  \label{eq:sscl}
+\end{equation}
+so the model gradually shifts from ground-truth future inputs to its own predicted graph states during training.
+
+\subsection{Long-Horizon Decision-Making}
+
+The cloud-side decision maker uses Graphflow as a learned world model. During training, Graphflow rolls out the traffic graph under candidate ego actions and provides the predicted risk fields used by the reward. During online operation, the trained policy is executed in a receding-horizon manner. Its role is not to directly actuate the vehicle, but to determine a long-horizon behavior guide that reduces interaction-induced rollover triggers. The policy receives the current traffic graph, historical surrounding-vehicle features, and ego features. The ego features include route distance, lane and ramp attributes, ego velocity and heading, lane-change status, neighbor-risk indicators, and navigation intention. Surrounding-vehicle features include existence, relative position, relative velocity, heading, lane relation, vehicle type, route intention, and surrogate safety indicators.
+
+The action is a sequence of acceleration and lane-change commands,
+\begin{equation}
+  A_c^{k:k+H_c}
+  =
+  \{a_{des}^{k:k+H_c},\,l_{cmd}^{k:k+H_c}\},
+  \label{eq:cloud_action}
+\end{equation}
+where $l_{cmd}$ is represented continuously during training and mapped to lane-keeping, left-lane-change, or right-lane-change decisions during execution. Surrounding-vehicle parameter and intention uncertainty is estimated from historical cloud twin data using driver and lane-change models. The longitudinal behavior uses a differentiable IDM form \cite{IDM_2020}, while the lane-change probability follows a MOBIL-style utility model \cite{MOBIL_1999}. Bayesian sampling updates the uncertainty of these parameters and intentions when sufficient history or lane-change events are observed.
+
+The policy is trained with PPO. Its reward combines safety, efficiency, comfort/economy, temporal consistency, traffic-rule compliance, and navigation consistency:
+\begin{equation}
+  r=w_s r_s+w_e r_e+w_c r_c+w_{con}r_{con}+w_r r_r+w_n r_n.
+  \label{eq:cloud_reward}
+\end{equation}
+The safety reward integrates the risk field over ego-occupied nodes and the prediction horizon:
+\begin{equation}
+  \begin{aligned}
+  r_s=&-\frac{1}{H_c Z_o}
+  \sum_{t=1}^{H_c}\sum_{\mathbf{v}\in\mathcal{V}}
+  \gamma^t c_{risk}(\mathbf{v},t)\mathbb{I}(c_{ego}>\epsilon_o),\\
+  Z_o=&\sum_{\mathbf{v}\in\mathcal{V}}\mathbb{I}(c_{ego}>\epsilon_o).
+  \end{aligned}
+  \label{eq:safety_reward}
+\end{equation}
+Efficiency rewards speed close to the road limit, comfort penalizes acceleration and lane-change command magnitude, consistency penalizes discontinuity between successive planned action sequences, and rule/navigation rewards penalize speeding and encourage route-consistent lanes. The trained policy outputs the long-horizon driving decision $d_c$.
+
+\subsection{Rollover-Aware Reference Trajectory Generation}
+
+The cloud decision is converted into a continuous trajectory before being transmitted to the vehicle. Longitudinal motion is obtained by integrating the desired acceleration. For lane changes, a sixth-order polynomial is used:
+\begin{equation}
+\begin{cases}
+x(t)=a_0+a_1t+a_2t^2+a_3t^3+a_4t^4+a_5t^5+a_6t^6,\\
+y(t)=b_0+b_1t+b_2t^2+b_3t^3+b_4t^4+b_5t^5+b_6t^6.
+\end{cases}
+\label{eq:sixth_order_traj}
+\end{equation}
+The initial and terminal position, velocity, and acceleration constraints determine all coefficients except $a_6$ and $b_6$. These remaining degrees of freedom are optimized for rollover awareness. The trajectory lateral acceleration is calculated from curvature:
+\begin{equation}
+  a_y(t)=
+  \frac{\dot{x}(t)\ddot{y}(t)-\dot{y}(t)\ddot{x}(t)}
+  {\sqrt{\dot{x}(t)^2+\dot{y}(t)^2}}.
+  \label{eq:lateral_acc_from_traj}
+\end{equation}
+The approximate rollover response is represented by a second-order LTR model:
+\begin{equation}
+  \ddot{\widetilde{\mathrm{LTR}}}
+  +2\zeta\omega_n\dot{\widetilde{\mathrm{LTR}}}
+  +\omega_n^2\widetilde{\mathrm{LTR}}
+  =a_y(t).
+  \label{eq:approx_ltr_model}
+\end{equation}
+The cloud-side trajectory optimization is
+\begin{equation}
 \begin{aligned}
-x_{k+1} &= A_d x_k + B_d u_k \\
-y_k &= C_d x_k
+  \min_{a_6,b_6}\quad &\|\widetilde{\mathrm{LTR}}(t)\|_{\infty}\\
+  \mathrm{s.t.}\quad
+  &|\delta(t)|\leq\delta_{max},\quad
+  |\dot{\delta}(t)|\leq\dot{\delta}_{max},\\
+  &\delta(t)=\arctan(L\kappa(t)).
 \end{aligned}
-\right.
+\label{eq:cloud_rollover_traj_opt}
 \end{equation}
+The source thesis reports that, for a liquid tanker parameterization with $\zeta=0.4$ and $\omega_n=1.8$ Hz, the optimized lane-change trajectory becomes asymmetric and reduces the maximum LTR by approximately 10--20\% compared with a symmetric fifth-order polynomial under the tested speeds.
 
-The state variable $x_k$ and observation variable $y_k$ are defined in equations (\ref{eq:xk}) and (\ref{eq:yk}), respectively, with the subscripts $k$ omitted. The only control input is the front wheel steering angle $u_k = \delta_k$. 
-
-For path tracking, as shown in Fig. \ref{fig:architecture}, assume that local path planning is provided by predictive cruise control or other applications, the reference values for the vehicle's $Y_{1,k+i}$, $X_{1,k+i}$, $\psi_{1,k+i}$, and $\delta_{k+i}$ are determined according to linear interpolation of the reference path assuming constant speed in the predictive horizon, and a collision-free reference path is assumed. The reference values for $\theta_{r,i}$, $\dot{\theta}_{r,i}$, and $LTR_{eql,r,i}$ are set to 0. 
-
-In this work, to achieve a smoother control effect and enhance the safety of semi - trailer tank trucks, we employed an incremental model predictive control (MPC) approach with output constraints. Specifically, this approach aims to limit the increment of the control input and keep the lateral load transfer ratio at equilibrium ($LTR_{eql}$) within a safe boundary, for example, the interval $[-0.75, 0.75]$. For interested readers seeking a more in - depth understanding of MPC fundamentals, we refer to \cite{BookMPC}.
-
-To accelerate the computational process, we implemented a modified version of the moving block method \cite{Cutler1980DynamicMatrixControl} combined with the constraint set compression (CSC) approach. We defined two compression mapping matrices: $T_{N_p(N_x + N_u)\times N_cN_u}$ and $\Pi_{N_yN_r\times N_p(N_x + N_u)}$. Here, $N_p$ represents the prediction horizon, $N_x$ is the number of state variables, $N_u$ is the number of control inputs, $N_c$ is the number of decision variables, and $N_r$ is the number of constrained steps within the prediction horizon, with the conditions $N_c, N_r \leq N_p$. By reducing the number of decision variables and output constraints for time steps farther from the current one within the prediction horizon, we can significantly reduce the peak solving time of the quadratic programming (QP) problem, especially when the active set is large. According to \cite{EbenLi_FastMPC}, this approach has less than a 1\% impact on the optimality of the control solutions. These measures are crucial for the real - time control of semi - trailer tank trucks with high - dimensional state spaces.
-
-To handle potential conflicts between input and output hard constraints and apply soft constraints to output variables, we introduced a relaxation term $\rho\epsilon^2$ into the cost function $J$. Here, $\epsilon$ is the relaxation factor, and $\rho$ is the relaxation coefficient \cite{soft_constraint_Eben2010}. 
-
-In highly uncertain situations, to guarantee robust stability, we tightened the output constraints to ensure that the vehicle state remains within the stability domain. This approach is similar to the dual - mode MPC \cite{soft_constraint_Eben2010}. However, unlike dual - mode MPC, we do not switch the controller strategy for asymptotic stability, as this is not feasible for real - world tracking problems. Instead, we ensure Lyapunov stability within the stability domain.
-
-The MPC problem is reformulated as a standard quadratic programming (QP) problem as shown below:
- 
-\vspace{-0.1cm}
-\begin{equation}
-\begin{matrix}
-{\underset{\Delta U}{argmin}{J = \frac{1}{2}\begin{bmatrix}
-{\Delta U^{T}} & \epsilon
-\end{bmatrix}\begin{bmatrix}
-H & 0 \\
-0 & \rho
-\end{bmatrix}\begin{bmatrix}
-{\Delta U} \\
-\epsilon
-\end{bmatrix} + \begin{bmatrix}
-g^{T} & 0
-\end{bmatrix}\begin{bmatrix}
-{\Delta U} \\
-\epsilon
-\end{bmatrix}}} \\
-{s.t.\left\{ \begin{matrix}
-{A_{t}\Delta U \leq U_{max} - U_{t}} \\
-{{- A}_{t}\Delta U \leq U_{min} + U_{t}} \\
-{\Pi\Theta T\Delta U - \epsilon \leq \Pi\left( Y_{max} - E \right)} \\
-{- \Pi\Theta T\Delta U - \epsilon \leq \Pi\left( Y_{min} - E \right)} \\
-{\Delta U_{min} \leq \Delta U \leq \Delta U_{max}} \\
-{\epsilon_{min} \leq \epsilon \leq \epsilon_{max}}
-\end{matrix} \right.}
-\end{matrix}
-\end{equation}
-
-The constructed cost function is in a standard quadratic form, which can be efficiently solved using various QP solvers, such as osqp, qpOASES, and CVXOPT. In this study, we selected qpOASES to solve the QP problems.
-
-
-
-
-
-
-
-
+\begin{figure}[t]
+  \centering
+  \subfloat[Rollover response and polynomial optimization\label{fig:ltr_feature_journal}]
+    {\includegraphics[width=0.92\linewidth]{fig/chap3/ltr_feature.png}}\\
+  \subfloat[Solid-cargo and liquid-cargo reference comparison\label{fig:traj_compare_journal}]
+    {\includegraphics[width=0.92\linewidth]{fig/chap3/liquid_traj.jpg}}
+  \caption{Rollover-aware lane-change reference generation on the cloud side.}
+  \label{fig:cloud_rollover_reference}
+\end{figure}
